@@ -16,6 +16,7 @@ pub const Buffer = struct {
     const ADAPTIVE_EDIT_LOCALITY_WINDOW: usize = 8 * 1024;
     const ADAPTIVE_DISPERSED_STREAK: usize = 6;
     const ADAPTIVE_LOCALIZED_STREAK: usize = 4;
+    const MAX_UNDO_DEPTH: usize = 50;
 
     allocator: std.mem.Allocator,
     text: TextStore,
@@ -158,6 +159,13 @@ pub const Buffer = struct {
         while (self.history.items.len > self.history_idx) {
             const edit = self.history.pop() orelse break;
             self.allocator.free(edit.content);
+        }
+
+        // Enforce history depth limit
+        if (self.history.items.len >= MAX_UNDO_DEPTH) {
+            const oldest = self.history.orderedRemove(0);
+            self.allocator.free(oldest.content);
+            self.history_idx = @max(0, self.history_idx - 1);
         }
 
         // Store a full owned snapshot of the current text.
@@ -1327,3 +1335,27 @@ test "Buffer: undo captures current cursor for redo snapshot" {
     try std.testing.expectEqual(Position{ .row = 0, .col = 1 }, redo_pos);
     try std.testing.expectEqualStrings("Xhello", buf.getLine(0).?);
 }
+
+test "Buffer: history depth limit enforced" {
+    const allocator = std.testing.allocator;
+    var buf = try Buffer.initStrategy(allocator, .gap_buffer, "initial");
+    defer buf.deinit();
+
+    // Push 100 undo snapshots
+    for (0..100) |i| {
+        try buf.pushUndo(.{ .row = 0, .col = 0 });
+        try buf.insertCharAt(.{ .row = 0, .col = 0 }, @as(u8, @intCast(65 + (i % 26))));
+    }
+
+    // Verify history never exceeds MAX_UNDO_DEPTH
+    try std.testing.expect(buf.history.items.len <= Buffer.MAX_UNDO_DEPTH);
+    try std.testing.expectEqual(Buffer.MAX_UNDO_DEPTH, buf.history.items.len);
+
+    // Verify we can still undo and redo
+    const undo1 = (try buf.undo(.{ .row = 0, .col = 0 })) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(0, undo1.row);
+
+    const redo1 = (try buf.redo()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(0, redo1.row);
+}
+

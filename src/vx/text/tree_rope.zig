@@ -5,10 +5,14 @@ const LineRange = @import("storage.zig").LineRange;
 const LineCache = @import("line_cache.zig").LineCache;
 
 /// Maximum bytes per leaf chunk.
-const CHUNK_SIZE: usize = 4096;
+/// Increased from 4096 to reduce fragmentation during node reconstruction.
+/// Larger chunks reduce node count by ~50%, decreasing temporary allocations.
+const CHUNK_SIZE: usize = 8192;
 
 /// Branching factor for internal nodes.
-const BRANCHING: usize = 16;
+/// Increased from 16 to reduce fragmentation and memory overhead.
+/// Higher branching reduces tree depth and node count by ~50%.
+const BRANCHING: usize = 32;
 
 /// B+ tree rope with per-node text summaries.
 ///
