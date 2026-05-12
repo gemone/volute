@@ -13,8 +13,6 @@ pub fn render(self: *Editor) !void {
     var style_buf: std.ArrayList(syntax.TokenStyle) = .empty;
     defer style_buf.deinit(gpa);
 
-    try term.hideCursor(gpa, &buf);
-
     const buf_ptr = self.getBuffer() orelse return;
     const language = syntax.detectLanguage(buf_ptr.path);
     const rows = self.terminal.size.rows;
@@ -30,6 +28,11 @@ pub fn render(self: *Editor) !void {
         self.last_render_mode != self.mode or
         selection_active or
         self.last_render_selection_active;
+
+    // Only hide cursor when rendering full screen content to reduce flicker
+    if (full_redraw) {
+        try term.hideCursor(gpa, &buf);
+    }
 
     if (full_redraw) {
         try term.clearScreen(gpa, &buf);
@@ -131,6 +134,7 @@ pub fn render(self: *Editor) !void {
 
     try appendCursorPresentation(self, gpa, &buf, buf_ptr, text_start, cols);
 
+    // Show cursor after positioning it
     try term.showCursor(gpa, &buf);
 
     try self.terminal.writeAll(buf.items);
