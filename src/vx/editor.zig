@@ -59,7 +59,7 @@ pub const Editor = struct {
     last_render_cols: usize,
     last_render_cursor: Position,
     last_render_mode: Mode,
-    last_render_selection_active: bool,
+    last_render_selection: ?Selection,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !Self {
         var terminal = try Terminal.init(io);
@@ -102,7 +102,7 @@ pub const Editor = struct {
             .last_render_cols = 0,
             .last_render_cursor = .{},
             .last_render_mode = .normal,
-            .last_render_selection_active = false,
+            .last_render_selection = null,
         };
     }
 
@@ -1530,7 +1530,7 @@ fn initTestEditor(initial: []const u8) !Editor {
         .last_render_cols = 0,
         .last_render_cursor = .{},
         .last_render_mode = .insert,
-        .last_render_selection_active = false,
+        .last_render_selection = null,
     };
     const buf = try Buffer.initStrategy(allocator, .gap_buffer, initial);
     errdefer buf.deinit();

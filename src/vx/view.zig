@@ -1,10 +1,17 @@
 const std = @import("std");
 const Buffer = @import("buffer.zig").Buffer;
 const Editor = @import("editor.zig").Editor;
+const Selection = @import("selection.zig").Selection;
 const keymap = @import("keymap.zig");
 const term = @import("terminal.zig");
 const syntax = @import("syntax.zig");
 const utf8 = @import("utf8.zig");
+
+fn selectionsEqual(sel1: ?Selection, sel2: ?Selection) bool {
+    if (sel1 == null and sel2 == null) return true;
+    if (sel1 == null or sel2 == null) return false;
+    return sel1.?.anchor.eql(sel2.?.anchor) and sel1.?.cursor.eql(sel2.?.cursor);
+}
 
 pub fn render(self: *Editor) !void {
     const gpa = self.allocator;
@@ -20,14 +27,13 @@ pub fn render(self: *Editor) !void {
     const line_num_width = lineWidth(buf_ptr.lineCount());
     const text_start = contentStartColumn(line_num_width);
     const cursor_moved = self.last_render_cursor.row != self.cursor.row or self.last_render_cursor.col != self.cursor.col;
-    const selection_active = self.selection != null;
+    const selection_changed = !selectionsEqual(self.selection, self.last_render_selection);
     const full_redraw = self.last_render_buf != buf_ptr or
         self.last_render_scroll != self.scroll or
         self.last_render_rows != rows or
         self.last_render_cols != cols or
         self.last_render_mode != self.mode or
-        selection_active or
-        self.last_render_selection_active;
+        selection_changed;
 
     // Only hide cursor when rendering full screen content to reduce flicker
     if (full_redraw) {
@@ -145,7 +151,7 @@ pub fn render(self: *Editor) !void {
     self.last_render_cols = cols;
     self.last_render_cursor = self.cursor;
     self.last_render_mode = self.mode;
-    self.last_render_selection_active = selection_active;
+    self.last_render_selection = self.selection;
 }
 
 fn appendRenderedTextRow(
@@ -804,7 +810,7 @@ fn initTestEditor(initial: []const u8) !Editor {
         .last_render_cols = 0,
         .last_render_cursor = .{},
         .last_render_mode = .insert,
-        .last_render_selection_active = false,
+        .last_render_selection = null,
     };
     const buf = try Buffer.initStrategy(allocator, .gap_buffer, initial);
     errdefer buf.deinit();

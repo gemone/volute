@@ -2,6 +2,38 @@ const std = @import("std");
 const Key = @import("key.zig").Key;
 const File = std.Io.File;
 
+pub const Color = enum { default, red, green, yellow, blue, magenta, cyan, white, gray };
+
+pub const TerminalState = struct {
+    current_fg: ?Color = null,
+    current_bg: ?Color = null,
+    current_bold: bool = false,
+    current_reverse: bool = false,
+
+    pub fn reset(self: *TerminalState) void {
+        self.current_fg = null;
+        self.current_bg = null;
+        self.current_bold = false;
+        self.current_reverse = false;
+    }
+
+    pub fn needsFgChange(self: *const TerminalState, new_color: Color) bool {
+        return self.current_fg != new_color;
+    }
+
+    pub fn needsBgChange(self: *const TerminalState, new_color: Color) bool {
+        return self.current_bg != new_color;
+    }
+
+    pub fn needsBoldChange(self: *const TerminalState, new_bold: bool) bool {
+        return self.current_bold != new_bold;
+    }
+
+    pub fn needsReverseChange(self: *const TerminalState, new_reverse: bool) bool {
+        return self.current_reverse != new_reverse;
+    }
+};
+
 pub const Terminal = struct {
     const Self = @This();
 
