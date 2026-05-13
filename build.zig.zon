@@ -1,0 +1,10 @@
+.{
+    .name = .vx,
+    .version = "0.1.0",
+    .fingerprint = 0x66623581bf22c233,
+    .paths = .{
+        "src",
+        "build.zig",
+        "build.zig.zon",
+    },
+}

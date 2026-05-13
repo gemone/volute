@@ -1,0 +1,20 @@
+# Rust/Original Helix
+target
+.direnv
+helix-term/rustfmt.toml
+result
+runtime/grammars
+
+# Zig build outputs
+zig-out/
+.zig-cache/
+
+# Temporary test files
+.copilot_*.zig
+test_*.zig
+test_*.txt
+tmux_*.txt
+
+# OS files
+.DS_Store
+Thumbs.db
