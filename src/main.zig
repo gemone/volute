@@ -24,16 +24,18 @@ pub fn main(init: std.process.Init) !void {
         try editor.buffers.append(allocator, buf);
     }
 
+    try @import("vx/view.zig").render(&editor);
     while (!editor.should_quit) {
-        try @import("vx/view.zig").render(&editor);
-
         const key = editor.terminal.readKey() catch |err| {
             if (err == error.WouldBlock or err == error.SystemResources) continue;
             return err;
         };
 
         if (key) |k| {
-            try editor.handleKey(k);
+            try drainQueuedInput(&editor, k);
+            if (!editor.should_quit) {
+                try @import("vx/view.zig").render(&editor);
+            }
         }
     }
 }
@@ -48,6 +50,74 @@ fn readCursorStyleEnv(name: [*:0]const u8) ?terminal.CursorStyle {
     const value = std.c.getenv(name) orelse return null;
     const slice = std.mem.span(value);
     return terminal.parseCursorStyle(slice);
+}
+
+fn drainQueuedInput(editor: *Editor, first_key: @import("vx/key.zig").Key) !void {
+    const Key = @import("vx/key.zig").Key;
+
+    var pending: ?Key = first_key;
+    var text_burst: std.ArrayList(u8) = .empty;
+    defer text_burst.deinit(editor.allocator);
+
+    while (pending) |key| {
+        pending = null;
+        if (editor.mode == .insert and isBurstInsertKey(key)) {
+            text_burst.clearRetainingCapacity();
+            try appendBurstInsertBytes(editor.allocator, &text_burst, key);
+
+            while (true) {
+                const next = try readKeyNonBlocking(&editor.terminal);
+                if (next == null) break;
+                if (editor.mode != .insert or !isBurstInsertKey(next.?)) {
+                    pending = next.?;
+                    break;
+                }
+                try appendBurstInsertBytes(editor.allocator, &text_burst, next.?);
+            }
+
+            if (text_burst.items.len > 0) {
+                try editor.insertTextBytes(text_burst.items);
+            }
+            continue;
+        }
+
+        try editor.handleKey(key);
+        pending = try readKeyNonBlocking(&editor.terminal);
+    }
+}
+
+fn isBurstInsertKey(key: @import("vx/key.zig").Key) bool {
+    if (key.mod.ctrl or key.mod.alt) return false;
+    return key.getBytes().len > 0 or key.char() != null;
+}
+
+fn appendBurstInsertBytes(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), key: @import("vx/key.zig").Key) !void {
+    const bytes = key.getBytes();
+    if (bytes.len > 0) {
+        try buf.appendSlice(allocator, bytes);
+        return;
+    }
+    if (key.char()) |ch| {
+        try buf.append(allocator, ch);
+    }
+}
+
+fn readKeyNonBlocking(tty: *@import("vx/terminal.zig").Terminal) !?@import("vx/key.zig").Key {
+    return tty.readKey() catch |err| switch (err) {
+        error.WouldBlock, error.SystemResources => null,
+        else => return err,
+    };
+}
+
+test "main: burst batching ignores modified shortcut keys" {
+    const Key = @import("vx/key.zig").Key;
+
+    const utf8_bytes = [_]u8{ 0xE5, 0xA5, 0xBD };
+
+    try std.testing.expect(isBurstInsertKey(Key.init(.lower_a)));
+    try std.testing.expect(isBurstInsertKey(Key.initUtf8(&utf8_bytes)));
+    try std.testing.expect(!isBurstInsertKey(Key.initCtrl(.lower_a)));
+    try std.testing.expect(!isBurstInsertKey(Key.initAlt(.lower_x)));
 }
 
 test {
