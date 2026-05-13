@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 320" role="img" aria-label="Volute logo">
+  <g>
+    <path fill="#7c6cf2" d="M144 24 258 90q22 12 22 36v22L144 70Z"/>
+    <path fill="#4ed4f6" d="M280 172v22q0 24-22 36L144 296v-46Z"/>
+    <path fill="#6fe7d8" d="m176 296-114-66q-22-12-22-36v-22l136 78Z"/>
+    <path fill="#a46beb" d="M40 148v-22q0-24 22-36L176 24v46Z"/>
+  </g>
+  <text x="360" y="150" fill="#f3f6fb" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="104" font-weight="700" letter-spacing="1">Volute</text>
+  <text x="364" y="206" fill="#9aa4b5" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="28" font-weight="600" letter-spacing="1.5">OUT-OF-THE-BOX TUI EDITOR</text>
+</svg>
