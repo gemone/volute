@@ -12,8 +12,6 @@
 
 </div>
 
-![Screenshot](./screenshot.png)
-
 ## What is Volute?
 
 Volute is a terminal-first editor focused on being immediately usable, fast to start, and comfortable for modal editing.
