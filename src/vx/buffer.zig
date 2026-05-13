@@ -16,16 +16,17 @@ pub const Buffer = struct {
     const ADAPTIVE_EDIT_LOCALITY_WINDOW: usize = 8 * 1024;
     const ADAPTIVE_DISPERSED_STREAK: usize = 6;
     const ADAPTIVE_LOCALIZED_STREAK: usize = 4;
-    const MAX_UNDO_DEPTH: usize = 50;
-
+    const MAX_HISTORY_DEPTH: usize = 50;
+    const MAX_HISTORY_BYTES: usize = 1 * 1024 * 1024;
     allocator: std.mem.Allocator,
     text: TextStore,
     backend_strategy: Strategy,
     path: ?[]const u8,
     dirty: bool,
 
-    history: std.ArrayList(Edit),
-    history_idx: usize,
+    history_root: *HistoryNode,
+    history_current: *HistoryNode,
+    pending_history: ?PendingHistory,
 
     // Reusable buffer for getLine() output.
     // Returned slices are valid until the next getLine() call.
@@ -37,9 +38,6 @@ pub const Buffer = struct {
 
     // Rendering cache: tracks which lines have been modified since last render
     render_cache: RenderCache,
-
-    // Track if buffer has mutated since last undo operation
-    mutated_since_undo: bool,
 
     const RenderCache = struct {
         /// Tracks line modification state for incremental rendering
@@ -88,13 +86,38 @@ pub const Buffer = struct {
         }
     };
 
-    pub const Edit = struct {
-        // Delta-based storage instead of full snapshots
-        kind: enum { insert, delete },
+    const Delta = struct {
         offset: usize,
-        content: []const u8,
-        cursor: Position,
+        deleted: []u8,
+        inserted: []u8,
+    };
+
+    const HistoryNode = struct {
+        parent: ?*HistoryNode,
+        children: std.ArrayList(*HistoryNode),
+        preferred_child: ?*HistoryNode,
+        deltas: std.ArrayList(Delta),
+        cursor_before: Position,
+        cursor_after: Position,
+        before_strategy: Strategy,
+        after_strategy: Strategy,
+        depth: usize,
+    };
+
+    const PendingHistory = struct {
+        parent: *HistoryNode,
+        deltas: std.ArrayList(Delta),
+        cursor_before: Position,
+        before_strategy: Strategy,
+    };
+
+    const MutationState = struct {
         strategy: Strategy,
+        dirty: bool,
+        last_edit_offset: ?usize,
+        localized_edit_streak: usize,
+        dispersed_edit_streak: usize,
+        render_cache_len: usize,
     };
 
     /// Initialize a new Buffer with auto-selected backend.
@@ -118,8 +141,9 @@ pub const Buffer = struct {
             .backend_strategy = resolved_strategy,
             .path = null,
             .dirty = false,
-            .history = .empty,
-            .history_idx = 0,
+            .history_root = undefined,
+            .history_current = undefined,
+            .pending_history = null,
             .line_buf = .empty,
             .last_edit_offset = null,
             .localized_edit_streak = 0,
@@ -127,11 +151,13 @@ pub const Buffer = struct {
             .render_cache = .{
                 .dirty_lines = try std.ArrayList(bool).initCapacity(allocator, initial_lines),
             },
-            .mutated_since_undo = false,
         };
         // Initialize render cache with all lines marked dirty
         try self.render_cache.dirty_lines.resize(allocator, initial_lines);
         @memset(self.render_cache.dirty_lines.items, true);
+
+        self.history_root = try self.createHistoryRoot(resolved_strategy);
+        self.history_current = self.history_root;
 
         return self;
     }
@@ -139,7 +165,6 @@ pub const Buffer = struct {
     pub fn deinit(self: *Self) void {
         self.text.deinit(self.allocator);
         self.clearHistory();
-        self.history.deinit(self.allocator);
         if (self.path) |p| self.allocator.free(p);
         self.line_buf.deinit(self.allocator);
         self.render_cache.dirty_lines.deinit(self.allocator);
@@ -147,103 +172,284 @@ pub const Buffer = struct {
     }
 
     fn clearHistory(self: *Self) void {
-        for (self.history.items) |*edit| {
-            self.allocator.free(edit.content);
+        if (self.pending_history) |*pending| {
+            self.deinitDeltaList(&pending.deltas);
+            self.pending_history = null;
         }
-        self.history.clearRetainingCapacity();
-        self.history_idx = 0;
+        self.destroyHistoryNode(self.history_root);
+    }
+
+    fn createHistoryRoot(self: *Self, strategy: Strategy) !*HistoryNode {
+        const node = try self.allocator.create(HistoryNode);
+        node.* = .{
+            .parent = null,
+            .children = .empty,
+            .preferred_child = null,
+            .deltas = .empty,
+            .cursor_before = .{},
+            .cursor_after = .{},
+            .before_strategy = strategy,
+            .after_strategy = strategy,
+            .depth = 0,
+        };
+        return node;
+    }
+
+    fn destroyHistoryNode(self: *Self, node: *HistoryNode) void {
+        for (node.children.items) |child| {
+            self.destroyHistoryNode(child);
+        }
+        node.children.deinit(self.allocator);
+        self.deinitDeltaList(&node.deltas);
+        self.allocator.destroy(node);
+    }
+
+    fn deinitDeltaList(self: *Self, deltas: *std.ArrayList(Delta)) void {
+        for (deltas.items) |delta| {
+            self.allocator.free(delta.deleted);
+            self.allocator.free(delta.inserted);
+        }
+        deltas.deinit(self.allocator);
     }
 
     pub fn pushUndo(self: *Self, cursor: Position) !void {
-        // Discard any redo entries beyond current index
-        while (self.history.items.len > self.history_idx) {
-            const edit = self.history.pop() orelse break;
-            self.allocator.free(edit.content);
-        }
-
-        // Enforce history depth limit
-        if (self.history.items.len >= MAX_UNDO_DEPTH) {
-            const oldest = self.history.orderedRemove(0);
-            self.allocator.free(oldest.content);
-            self.history_idx = @max(0, self.history_idx - 1);
-        }
-
-        // Store a full owned snapshot of the current text.
-        const cloned_data = try borrowAllTextStore(&self.text, self.allocator);
-        errdefer self.allocator.free(cloned_data);
-
-        try self.history.append(self.allocator, .{
-            .kind = .insert,
-            .offset = 0,
-            .content = cloned_data,
-            .cursor = cursor,
-            .strategy = self.backend_strategy,
-        });
-        self.history_idx = self.history.items.len;
-        self.mutated_since_undo = false;
+        try self.finalizePendingHistory(cursor);
+        self.pending_history = .{
+            .parent = self.history_current,
+            .deltas = .empty,
+            .cursor_before = cursor,
+            .before_strategy = self.backend_strategy,
+        };
     }
 
     pub fn undo(self: *Self, cursor: Position) !?Position {
-        if (self.history_idx == 0) return null;
-        if (self.history_idx == self.history.items.len) {
-            // Save current state before undoing
-            const latest = self.history.items[self.history_idx - 1].content;
-            const current_data = try borrowAllTextStore(&self.text, self.allocator);
-            if (std.mem.eql(u8, current_data, latest)) {
-                self.allocator.free(current_data);
-            } else {
-                errdefer self.allocator.free(current_data);
-                try self.history.append(self.allocator, .{
-                    .kind = .insert,
-                    .offset = 0,
-                    .content = current_data,
-                    .cursor = cursor,
-                    .strategy = self.backend_strategy,
-                });
-                self.history_idx = self.history.items.len;
-            }
+        try self.finalizePendingHistory(cursor);
+        if (self.history_current == self.history_root) return null;
+
+        const node = self.history_current;
+        const parent = node.parent orelse return null;
+        parent.preferred_child = node;
+        try self.applyHistoryNodeReverse(node);
+        self.history_current = parent;
+        return node.cursor_before;
+    }
+
+    pub fn redo(self: *Self, cursor: Position) !?Position {
+        try self.finalizePendingHistory(cursor);
+        const child = self.historyCurrentRedoChild() orelse return null;
+        try self.applyHistoryNodeForward(child);
+        self.history_current = child;
+        return child.cursor_after;
+    }
+
+    fn historyCurrentRedoChild(self: *Self) ?*HistoryNode {
+        if (self.history_current.preferred_child) |preferred| return preferred;
+        if (self.history_current.children.items.len == 0) return null;
+        return self.history_current.children.items[self.history_current.children.items.len - 1];
+    }
+
+    fn finalizePendingHistory(self: *Self, cursor_after: Position) !void {
+        var pending = self.pending_history orelse return;
+        defer self.pending_history = null;
+
+        if (pending.deltas.items.len == 0) {
+            pending.deltas.deinit(self.allocator);
+            return;
         }
-        self.history_idx -= 1;
-        const pos = try self.restoreSnapshot();
-        self.mutated_since_undo = false;
-        return pos;
+
+        const node = try self.allocator.create(HistoryNode);
+        node.* = .{
+            .parent = pending.parent,
+            .children = .empty,
+            .preferred_child = null,
+            .deltas = pending.deltas,
+            .cursor_before = pending.cursor_before,
+            .cursor_after = cursor_after,
+            .before_strategy = pending.before_strategy,
+            .after_strategy = self.backend_strategy,
+            .depth = pending.parent.depth + 1,
+        };
+        errdefer {
+            self.deinitDeltaList(&node.deltas);
+            self.allocator.destroy(node);
+        }
+
+        try pending.parent.children.append(self.allocator, node);
+        pending.parent.preferred_child = node;
+        self.history_current = node;
+        try self.enforceHistoryDepth();
     }
 
-    pub fn redo(self: *Self) !?Position {
-        if (self.history_idx >= self.history.items.len) return null;
-        self.history_idx += 1;
-        const pos = try self.restoreSnapshot();
-        self.mutated_since_undo = false;
-        return pos;
+    fn enforceHistoryDepth(self: *Self) !void {
+        try self.enforceHistoryDepthCap();
+        try self.enforceHistoryByteBudget();
     }
 
-    /// Borrow all text content from a TextStore as a byte array.
-    /// Caller owns the returned memory and must free it with allocator.free().
-    fn borrowAllTextStore(store: *const TextStore, allocator: std.mem.Allocator) ![]u8 {
-        var buf = try std.ArrayList(u8).initCapacity(allocator, @intCast(store.len()));
-        errdefer buf.deinit(allocator);
-        try store.writeToBuf(allocator, &buf);
-        return buf.toOwnedSlice(allocator);
+    fn enforceHistoryDepthCap(self: *Self) !void {
+        if (self.history_current.depth <= MAX_HISTORY_DEPTH) return;
+        const frontier = self.historyFrontierForRetentionDepth(MAX_HISTORY_DEPTH) orelse return;
+        try self.rebaseHistoryRoot(frontier);
     }
 
-    fn restoreSnapshot(self: *Self) !?Position {
-        if (self.history_idx == 0) return null;
-        const edit = &self.history.items[self.history_idx - 1];
+    fn enforceHistoryByteBudget(self: *Self) !void {
+        if (self.history_current == self.history_root) return;
+        if (self.historyRetainedBytes() <= MAX_HISTORY_BYTES) return;
 
-        // Restore by replacing entire content
-        self.text.deinit(self.allocator);
-        self.text = try createTextStore(self.allocator, edit.strategy, edit.content);
-        self.backend_strategy = edit.strategy;
+        var selected = self.history_current;
+        var node = self.history_current;
+        while (node.parent) |parent| {
+            if (self.historySubtreeBytes(parent) > MAX_HISTORY_BYTES) break;
+            selected = parent;
+            node = parent;
+        }
+
+        if (selected != self.history_root) {
+            try self.rebaseHistoryRoot(selected);
+        }
+    }
+
+    fn historyFrontierForRetentionDepth(self: *Self, retain_depth: usize) ?*HistoryNode {
+        if (self.history_current.depth <= retain_depth) return null;
+
+        const frontier_depth = self.history_current.depth - retain_depth + 1;
+        var node = self.history_current;
+        while (node.depth > frontier_depth) {
+            node = node.parent orelse return null;
+        }
+        return node;
+    }
+
+    fn rebaseHistoryRoot(self: *Self, frontier: *HistoryNode) !void {
+        const old_root = self.history_root;
+        if (frontier == old_root) return;
+
+        const old_parent = frontier.parent orelse return;
+        const frontier_idx = self.historyChildIndex(old_parent, frontier) orelse return;
+
+        const new_root = try self.createHistoryRoot(frontier.before_strategy);
+        errdefer self.destroyHistoryNode(new_root);
+        try new_root.children.append(self.allocator, frontier);
+
+        _ = old_parent.children.orderedRemove(frontier_idx);
+        if (old_parent.preferred_child == frontier) old_parent.preferred_child = null;
+
+        frontier.parent = new_root;
+        new_root.preferred_child = frontier;
+
+        self.recomputeHistoryDepths(new_root, 0);
+        self.history_root = new_root;
+        self.destroyHistoryNode(old_root);
+    }
+
+    fn historyChildIndex(self: *Self, parent: *const HistoryNode, child: *const HistoryNode) ?usize {
+        _ = self;
+        for (parent.children.items, 0..) |candidate, idx| {
+            if (candidate == child) return idx;
+        }
+        return null;
+    }
+
+    fn recomputeHistoryDepths(self: *Self, node: *HistoryNode, depth: usize) void {
+        node.depth = depth;
+        for (node.children.items) |child| {
+            self.recomputeHistoryDepths(child, depth + 1);
+        }
+    }
+
+    fn historyRetainedBytes(self: *Self) usize {
+        return self.historySubtreeBytes(self.history_root);
+    }
+
+    fn historySubtreeBytes(self: *Self, node: *const HistoryNode) usize {
+        var total = historyNodeOwnBytes(node);
+        for (node.children.items) |child| {
+            total += self.historySubtreeBytes(child);
+        }
+        return total;
+    }
+
+    fn historyNodeOwnBytes(node: *const HistoryNode) usize {
+        var total: usize = 0;
+        for (node.deltas.items) |delta| {
+            total += delta.deleted.len + delta.inserted.len;
+        }
+        return total;
+    }
+
+    fn applyHistoryNodeForward(self: *Self, node: *const HistoryNode) !void {
+        for (node.deltas.items) |delta| {
+            try self.applyRecordedDelta(delta.offset, delta.deleted, delta.inserted);
+        }
+        try self.ensureBackendStrategy(node.after_strategy);
+        try self.afterHistoryReplay();
+    }
+
+    fn applyHistoryNodeReverse(self: *Self, node: *const HistoryNode) !void {
+        var idx = node.deltas.items.len;
+        while (idx > 0) {
+            idx -= 1;
+            const delta = node.deltas.items[idx];
+            try self.applyRecordedDelta(delta.offset, delta.inserted, delta.deleted);
+        }
+        try self.ensureBackendStrategy(node.before_strategy);
+        try self.afterHistoryReplay();
+    }
+
+    fn applyRecordedDelta(self: *Self, offset: usize, deleted: []const u8, insert_bytes: []const u8) !void {
+        if (deleted.len > 0) {
+            try self.text.delete(offset, deleted.len);
+            errdefer self.text.insert(offset, deleted) catch {};
+        }
+        if (insert_bytes.len > 0) {
+            try self.text.insert(offset, insert_bytes);
+        }
+    }
+
+    fn afterHistoryReplay(self: *Self) !void {
         self.resetAdaptiveTracking();
-
-        // Update render cache
+        self.dirty = true;
         if (self.text.lineCount() != self.render_cache.dirty_lines.items.len) {
-            self.render_cache.resize(self.allocator, self.text.lineCount()) catch return null;
+            try self.render_cache.resize(self.allocator, self.text.lineCount());
         }
         self.render_cache.invalidateAll();
-        self.dirty = true;
+    }
 
-        return edit.cursor;
+    fn recordDelta(self: *Self, offset: usize, deleted: []u8, inserted: []u8) !void {
+        if (self.pending_history == null) {
+            self.allocator.free(deleted);
+            self.allocator.free(inserted);
+            return;
+        }
+
+        var pending = &self.pending_history.?;
+        if (pending.deltas.items.len > 0) {
+            var last = &pending.deltas.items[pending.deltas.items.len - 1];
+            if (last.deleted.len == 0 and deleted.len == 0 and offset == last.offset + last.inserted.len) {
+                last.inserted = try self.allocator.realloc(last.inserted, last.inserted.len + inserted.len);
+                @memcpy(last.inserted[last.inserted.len - inserted.len ..], inserted);
+                self.allocator.free(inserted);
+                self.allocator.free(deleted);
+                return;
+            }
+            if (last.inserted.len == 0 and inserted.len == 0 and offset + deleted.len == last.offset) {
+                const merged = try self.allocator.alloc(u8, deleted.len + last.deleted.len);
+                @memcpy(merged[0..deleted.len], deleted);
+                @memcpy(merged[deleted.len..], last.deleted);
+                self.allocator.free(last.deleted);
+                last.deleted = merged;
+                last.offset = offset;
+                self.allocator.free(inserted);
+                self.allocator.free(deleted);
+                return;
+            }
+        }
+        // replaceRange() still owns deleted/inserted cleanup on append failure; ownership
+        // transfers to history only after this append succeeds.
+        try pending.deltas.append(self.allocator, .{
+            .offset = offset,
+            .deleted = deleted,
+            .inserted = inserted,
+        });
     }
 
     pub fn openFile(allocator: std.mem.Allocator, io: Io, path: []const u8) !*Self {
@@ -336,15 +542,13 @@ pub const Buffer = struct {
 
     pub fn insertCharAt(self: *Self, pos: Position, ch: u8) !void {
         const offset = (try self.text.posToOffset(pos.row, pos.col)) orelse return;
-        try self.text.insert(offset, &[_]u8{ch});
-        try self.finishMutation(offset, 1);
+        try self.replaceRange(offset, 0, &[_]u8{ch});
     }
 
     pub fn insertBytesAt(self: *Self, pos: Position, bytes: []const u8) !void {
         if (bytes.len == 0) return;
         const offset = (try self.text.posToOffset(pos.row, pos.col)) orelse return;
-        try self.text.insert(offset, bytes);
-        try self.finishMutation(offset, bytes.len);
+        try self.replaceRange(offset, 0, bytes);
     }
 
     pub fn deleteCharAt(self: *Self, pos: Position) !?u8 {
@@ -355,8 +559,7 @@ pub const Buffer = struct {
             // Join with previous line: delete the newline at end of (row-1)
             const prev_line = self.getLine(pos.row - 1) orelse return null;
             const newline_off = (try self.text.posToOffset(pos.row - 1, prev_line.len)) orelse return null;
-            try self.text.delete(newline_off, 1);
-            try self.finishMutation(newline_off, 1);
+            try self.replaceRange(newline_off, 1, "");
             self.render_cache.markDirtyFrom(pos.row - 1);
             return '\n';
         }
@@ -369,15 +572,13 @@ pub const Buffer = struct {
 
         const ch = line[delete_start];
         const offset = (try self.text.posToOffset(pos.row, delete_start)) orelse return null;
-        try self.text.delete(offset, delete_end - delete_start);
-        try self.finishMutation(offset, delete_end - delete_start);
+        try self.replaceRange(offset, delete_end - delete_start, "");
         return ch;
     }
 
     pub fn insertNewlineAt(self: *Self, pos: Position) !void {
         const offset = (try self.text.posToOffset(pos.row, pos.col)) orelse return;
-        try self.text.insert(offset, "\n");
-        try self.finishMutation(offset, 1);
+        try self.replaceRange(offset, 0, "\n");
         self.render_cache.markDirtyFrom(pos.row);
     }
 
@@ -391,11 +592,7 @@ pub const Buffer = struct {
             end_range.end
         else
             self.text.len();
-        try self.text.delete(start_range.start, end_off - start_range.start);
-        if (self.text.len() == 0) {
-            try self.text.insert(0, "");
-        }
-        try self.finishMutation(start_range.start, end_off - start_range.start);
+        try self.replaceRange(start_range.start, end_off - start_range.start, "");
         self.render_cache.markDirtyFrom(start);
     }
 
@@ -406,22 +603,25 @@ pub const Buffer = struct {
         if (row == line_count) {
             const offset = self.text.len();
             if (row > 0) {
-                try self.text.insert(offset, "\n");
-                try self.text.insert(offset + 1, text);
-                try self.finishMutation(offset, text.len + 1);
+                var combined: std.ArrayList(u8) = .empty;
+                defer combined.deinit(self.allocator);
+                try combined.append(self.allocator, '\n');
+                try combined.appendSlice(self.allocator, text);
+                try self.replaceRange(offset, 0, combined.items);
                 self.render_cache.markDirtyFrom(row);
             } else {
-                try self.text.insert(offset, text);
-                try self.finishMutation(offset, text.len);
+                try self.replaceRange(offset, 0, text);
                 self.render_cache.markDirtyFrom(row);
             }
             return;
         }
 
         const offset = (try self.text.posToOffset(row, 0)) orelse return;
-        try self.text.insert(offset, text);
-        try self.text.insert(offset + text.len, "\n");
-        try self.finishMutation(offset, text.len + 1);
+        var combined: std.ArrayList(u8) = .empty;
+        defer combined.deinit(self.allocator);
+        try combined.appendSlice(self.allocator, text);
+        try combined.append(self.allocator, '\n');
+        try self.replaceRange(offset, 0, combined.items);
         self.render_cache.markDirtyFrom(row);
     }
 
@@ -431,9 +631,7 @@ pub const Buffer = struct {
             range.end - range.start - 1 // exclude the trailing newline
         else
             self.text.len() - range.start;
-        try self.text.delete(range.start, line_len);
-        try self.text.insert(range.start, text);
-        try self.finishMutation(range.start, line_len + text.len);
+        try self.replaceRange(range.start, line_len, text);
         self.render_cache.markDirtyFrom(row);
     }
 
@@ -450,18 +648,12 @@ pub const Buffer = struct {
         if (end <= start) return;
 
         const offset = (try self.text.posToOffset(row, start)) orelse return;
-        try self.text.delete(offset, end - start);
-        try self.text.insert(offset, bytes);
-        try self.finishMutation(offset, (end - start) + bytes.len);
+        try self.replaceRange(offset, end - start, bytes);
     }
 
     pub fn replaceLinePrefix(self: *Self, row: usize, prefix: []const u8, rest_start: usize) !void {
         const range = (try self.text.lineByteRange(row)) orelse return;
-        if (rest_start > 0) {
-            try self.text.delete(range.start, rest_start);
-        }
-        try self.text.insert(range.start, prefix);
-        try self.finishMutation(range.start, rest_start + prefix.len);
+        try self.replaceRange(range.start, rest_start, prefix);
         self.render_cache.markDirtyFrom(row);
     }
 
@@ -471,11 +663,7 @@ pub const Buffer = struct {
             range.end
         else
             self.text.len();
-        try self.text.delete(range.start, end_off - range.start);
-        if (self.text.len() == 0) {
-            try self.text.insert(0, "");
-        }
-        try self.finishMutation(range.start, end_off - range.start);
+        try self.replaceRange(range.start, end_off - range.start, "");
         self.render_cache.markDirtyFrom(row);
     }
 
@@ -487,18 +675,42 @@ pub const Buffer = struct {
 
         // Delete the newline at end of line1
         const newline_off = (try self.text.posToOffset(row, line1.len)) orelse return;
-        try self.text.delete(newline_off, 1);
-
-        // Delete leading whitespace from line2 (now right after the former newline)
         const ws_count = line2.len - trimmed.len;
-        if (ws_count > 0) {
-            try self.text.delete(newline_off, ws_count);
-        }
-
-        // Insert a single space between the joined lines
-        try self.text.insert(newline_off, " ");
-        try self.finishMutation(newline_off, ws_count + 1);
+        try self.replaceRange(newline_off, ws_count + 1, " ");
         self.render_cache.markDirtyFrom(row);
+    }
+
+    fn replaceRange(self: *Self, offset: usize, delete_len: usize, insert_bytes: []const u8) !void {
+        const state = MutationState{
+            .strategy = self.backend_strategy,
+            .dirty = self.dirty,
+            .last_edit_offset = self.last_edit_offset,
+            .localized_edit_streak = self.localized_edit_streak,
+            .dispersed_edit_streak = self.dispersed_edit_streak,
+            .render_cache_len = self.render_cache.dirty_lines.items.len,
+        };
+        const deleted = try self.copyTextRange(offset, delete_len);
+        errdefer self.allocator.free(deleted);
+        const inserted = try self.allocator.dupe(u8, insert_bytes);
+        errdefer self.allocator.free(inserted);
+
+        try self.applyRecordedDelta(offset, deleted, insert_bytes);
+        self.finishMutation(offset, deleted, inserted) catch |err| {
+            try self.rollbackReplaceRange(offset, deleted, inserted, state);
+            return err;
+        };
+    }
+
+    fn copyTextRange(self: *Self, offset: usize, len: usize) ![]u8 {
+        const clamped = @min(len, self.text.len() -| offset);
+        const out = try self.allocator.alloc(u8, clamped);
+        var copied: usize = 0;
+        while (copied < clamped) {
+            const read_len = try self.text.readChunk(offset + copied, out[copied..]);
+            if (read_len == 0) break;
+            copied += read_len;
+        }
+        return out[0..copied];
     }
 
     pub fn getAutoIndent(self: *Self, row: usize) []const u8 {
@@ -554,28 +766,38 @@ pub const Buffer = struct {
         self.last_edit_offset = offset;
     }
 
-    fn finishMutation(self: *Self, offset: usize, magnitude: usize) !void {
-        // Any real mutation after undo/redo invalidates future redo states.
-        while (self.history.items.len > self.history_idx) {
-            const edit = self.history.pop() orelse break;
-            self.allocator.free(edit.content);
-        }
-
+    fn finishMutation(self: *Self, offset: usize, deleted: []u8, inserted: []u8) !void {
+        const magnitude = deleted.len + inserted.len;
+        const spans_lines = std.mem.indexOfScalar(u8, deleted, '\n') != null or std.mem.indexOfScalar(u8, inserted, '\n') != null;
         self.recordEdit(offset);
         try self.adaptBackend(offset, magnitude);
         self.dirty = true;
-        self.mutated_since_undo = true;
-
-        // Mark affected lines as dirty for incremental rendering
-        const pos = self.text.offsetToPos(offset) catch return;
-        self.render_cache.markDirty(pos.row);
-        // Also mark next line as dirty if edit spans multiple lines
-        if (magnitude > 0) {
-            const end_pos = self.text.offsetToPos(offset + magnitude) catch return;
-            if (end_pos.row > pos.row) {
-                self.render_cache.markDirty(end_pos.row);
+        if (spans_lines) {
+            if (self.text.lineCount() != self.render_cache.dirty_lines.items.len) {
+                try self.render_cache.resize(self.allocator, self.text.lineCount());
             }
         }
+
+        const pos = try self.text.offsetToPos(offset);
+        if (spans_lines) {
+            self.render_cache.markDirtyFrom(pos.row);
+        } else {
+            self.render_cache.markDirty(pos.row);
+        }
+        try self.recordDelta(offset, deleted, inserted);
+    }
+
+    fn rollbackReplaceRange(self: *Self, offset: usize, deleted: []const u8, inserted: []const u8, state: MutationState) !void {
+        try self.applyRecordedDelta(offset, inserted, deleted);
+        try self.ensureBackendStrategy(state.strategy);
+        if (self.render_cache.dirty_lines.items.len != state.render_cache_len) {
+            try self.render_cache.resize(self.allocator, state.render_cache_len);
+        }
+        self.dirty = state.dirty;
+        self.last_edit_offset = state.last_edit_offset;
+        self.localized_edit_streak = state.localized_edit_streak;
+        self.dispersed_edit_streak = state.dispersed_edit_streak;
+        self.render_cache.invalidateAll();
     }
 
     fn adaptBackend(self: *Self, offset: usize, magnitude: usize) !void {
@@ -770,8 +992,7 @@ test "Buffer: adaptive migration preserves undo and redo snapshots" {
     defer allocator.free(large_text);
     @memset(large_text, 'z');
 
-    try buf.text.insert(buf.text.len(), large_text);
-    try buf.finishMutation(4, large_text.len);
+    try buf.replaceRange(4, 0, large_text);
     try std.testing.expectEqual(Strategy.tree_rope, buf.backend());
 
     try buf.pushUndo(.{ .row = 0, .col = buf.text.len() });
@@ -781,7 +1002,7 @@ test "Buffer: adaptive migration preserves undo and redo snapshots" {
     try std.testing.expectEqual(Strategy.gap_buffer, buf.backend());
     try std.testing.expectEqualStrings("seed", buf.getLine(0).?);
 
-    const redo_pos = (try buf.redo()) orelse return error.TestUnexpectedResult;
+    const redo_pos = (try buf.redo(.{ .row = 0, .col = 0 })) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(Position{ .row = 0, .col = 4 + large_text.len }, redo_pos);
     try std.testing.expectEqual(Strategy.tree_rope, buf.backend());
     try std.testing.expectEqual(@as(usize, 4 + large_text.len), buf.text.len());
@@ -1082,6 +1303,50 @@ test "Buffer: deleteLine propagates mutation errors" {
     try std.testing.expectError(error.OutOfMemory, buf.deleteLine(0));
 }
 
+test "Buffer: replaceRange rolls back text when mutation bookkeeping fails" {
+    const allocator = std.testing.allocator;
+    var saw_oom = false;
+
+    for (0..16) |fail_step| {
+        var failing_state = std.testing.FailingAllocator.init(allocator, .{});
+        var buf = try Buffer.initStrategy(failing_state.allocator(), .gap_buffer, "ab");
+        defer buf.deinit();
+
+        try buf.pushUndo(.{ .row = 0, .col = 1 });
+        failing_state.fail_index = failing_state.alloc_index + fail_step;
+
+        if (buf.insertNewlineAt(.{ .row = 0, .col = 1 })) |_| {
+            continue;
+        } else |err| switch (err) {
+            error.OutOfMemory => {
+                saw_oom = true;
+                failing_state.fail_index = std.math.maxInt(usize);
+                try expectBufferText(buf, "ab");
+            },
+            else => return err,
+        }
+    }
+
+    try std.testing.expect(saw_oom);
+}
+
+test "Buffer: finalizePendingHistory cleans up node if child append fails" {
+    const allocator = std.testing.allocator;
+
+    var failing_state = std.testing.FailingAllocator.init(allocator, .{});
+    var buf = try Buffer.initStrategy(failing_state.allocator(), .gap_buffer, "a");
+    defer buf.deinit();
+
+    try buf.pushUndo(.{ .row = 0, .col = 1 });
+    try buf.insertCharAt(.{ .row = 0, .col = 1 }, 'b');
+
+    failing_state.fail_index = failing_state.alloc_index + 1;
+    try std.testing.expectError(error.OutOfMemory, buf.finalizePendingHistory(.{ .row = 0, .col = 2 }));
+
+    failing_state.fail_index = std.math.maxInt(usize);
+    try expectBufferText(buf, "ab");
+}
+
 test "Buffer: replaceBytesAt swaps a full UTF-8 sequence" {
     const allocator = std.testing.allocator;
     var buf = try Buffer.initStrategy(allocator, .gap_buffer, null);
@@ -1248,7 +1513,7 @@ test "Buffer: single-edit undo then redo restores content" {
     _ = (try buf.undo(.{ .row = 0, .col = 1 })) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("hello", buf.getLine(0).?);
 
-    _ = (try buf.redo()) orelse return error.TestUnexpectedResult;
+    _ = (try buf.redo(.{ .row = 0, .col = 0 })) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("Xhello", buf.getLine(0).?);
 }
 
@@ -1291,7 +1556,7 @@ test "Buffer: rope undo then redo restores snapshots" {
     _ = (try buf.undo(.{ .row = 0, .col = 1 })) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u8, 'r'), buf.getLine(0).?[0]);
 
-    _ = (try buf.redo()) orelse return error.TestUnexpectedResult;
+    _ = (try buf.redo(.{ .row = 0, .col = 0 })) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u8, 'Z'), buf.getLine(0).?[0]);
 }
 
@@ -1315,10 +1580,29 @@ test "Buffer: edit after undo branches history and clears redo" {
     try std.testing.expectEqualStrings("XZhello", buf.getLine(0).?);
 
     // Redo of the old branch must be gone.
-    try std.testing.expect((try buf.redo()) == null);
+    try std.testing.expect((try buf.redo(.{ .row = 0, .col = 0 })) == null);
 
     _ = (try buf.undo(.{ .row = 0, .col = 2 })) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("Xhello", buf.getLine(0).?);
+}
+
+test "Buffer: branching undo keeps alternate redo branches in history tree" {
+    const allocator = std.testing.allocator;
+    var buf = try Buffer.initStrategy(allocator, .gap_buffer, "hello");
+    defer buf.deinit();
+
+    try buf.pushUndo(.{ .row = 0, .col = 0 });
+    try buf.insertCharAt(.{ .row = 0, .col = 0 }, 'X');
+    try buf.pushUndo(.{ .row = 0, .col = 1 });
+    try buf.insertCharAt(.{ .row = 0, .col = 1 }, 'Y');
+
+    _ = (try buf.undo(.{ .row = 0, .col = 2 })) orelse return error.TestUnexpectedResult;
+    try buf.pushUndo(.{ .row = 0, .col = 1 });
+    try buf.insertCharAt(.{ .row = 0, .col = 1 }, 'Z');
+    _ = (try buf.undo(.{ .row = 0, .col = 2 })) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(@as(usize, 2), buf.history_current.children.items.len);
+    try std.testing.expect(buf.history_current.preferred_child != null);
 }
 
 test "Buffer: undo captures current cursor for redo snapshot" {
@@ -1331,31 +1615,117 @@ test "Buffer: undo captures current cursor for redo snapshot" {
 
     const undo_pos = (try buf.undo(.{ .row = 0, .col = 1 })) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(Position{ .row = 0, .col = 0 }, undo_pos);
-    const redo_pos = (try buf.redo()) orelse return error.TestUnexpectedResult;
+    const redo_pos = (try buf.redo(.{ .row = 0, .col = 0 })) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(Position{ .row = 0, .col = 1 }, redo_pos);
     try std.testing.expectEqualStrings("Xhello", buf.getLine(0).?);
 }
 
-test "Buffer: history depth limit enforced" {
+test "Buffer: history depth cap retains only the most recent undo chain" {
     const allocator = std.testing.allocator;
     var buf = try Buffer.initStrategy(allocator, .gap_buffer, "initial");
     defer buf.deinit();
 
-    // Push 100 undo snapshots
-    for (0..100) |i| {
+    const total_edits = Buffer.MAX_HISTORY_DEPTH + 25;
+    for (0..total_edits) |i| {
         try buf.pushUndo(.{ .row = 0, .col = 0 });
         try buf.insertCharAt(.{ .row = 0, .col = 0 }, @as(u8, @intCast(65 + (i % 26))));
     }
 
-    // Verify history never exceeds MAX_UNDO_DEPTH
-    try std.testing.expect(buf.history.items.len <= Buffer.MAX_UNDO_DEPTH);
-    try std.testing.expectEqual(Buffer.MAX_UNDO_DEPTH, buf.history.items.len);
+    try buf.finalizePendingHistory(.{ .row = 0, .col = 0 });
 
-    // Verify we can still undo and redo
-    const undo1 = (try buf.undo(.{ .row = 0, .col = 0 })) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(0, undo1.row);
+    try std.testing.expectEqual(Buffer.MAX_HISTORY_DEPTH, buf.history_current.depth);
+    try std.testing.expectEqual(@as(usize, 1), buf.history_root.children.items.len);
 
-    const redo1 = (try buf.redo()) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(0, redo1.row);
+    var undo_count: usize = 0;
+    while (try buf.undo(.{ .row = 0, .col = 0 })) |_| {
+        undo_count += 1;
+    }
+    try std.testing.expectEqual(Buffer.MAX_HISTORY_DEPTH, undo_count);
+
+    var redo_count: usize = 0;
+    while (try buf.redo(.{ .row = 0, .col = 0 })) |_| {
+        redo_count += 1;
+    }
+    try std.testing.expectEqual(Buffer.MAX_HISTORY_DEPTH, redo_count);
 }
 
+test "Buffer: history pruning preserves alternate branches within retained depth" {
+    const allocator = std.testing.allocator;
+    var buf = try Buffer.initStrategy(allocator, .gap_buffer, "seed");
+    defer buf.deinit();
+
+    const total_edits = Buffer.MAX_HISTORY_DEPTH + 8;
+    for (0..total_edits) |i| {
+        try buf.pushUndo(.{ .row = 0, .col = 0 });
+        try buf.insertCharAt(.{ .row = 0, .col = 0 }, @as(u8, @intCast(65 + (i % 26))));
+    }
+    try buf.finalizePendingHistory(.{ .row = 0, .col = 0 });
+
+    _ = (try buf.undo(.{ .row = 0, .col = 0 })) orelse return error.TestUnexpectedResult;
+    _ = (try buf.undo(.{ .row = 0, .col = 0 })) orelse return error.TestUnexpectedResult;
+
+    const branch_point = buf.history_current;
+    try buf.pushUndo(.{ .row = 0, .col = 0 });
+    try buf.insertCharAt(.{ .row = 0, .col = 0 }, 'Z');
+    try buf.finalizePendingHistory(.{ .row = 0, .col = 1 });
+
+    _ = (try buf.undo(.{ .row = 0, .col = 1 })) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(branch_point, buf.history_current);
+    try std.testing.expectEqual(@as(usize, 2), branch_point.children.items.len);
+    try std.testing.expect(branch_point.preferred_child != null);
+    try std.testing.expect(branch_point.depth < Buffer.MAX_HISTORY_DEPTH);
+}
+
+test "Buffer: history byte budget prunes oversized retained deltas" {
+    const allocator = std.testing.allocator;
+    var buf = try Buffer.initStrategy(allocator, .gap_buffer, "");
+    defer buf.deinit();
+
+    const payload_len = Buffer.MAX_HISTORY_BYTES / 4 + 128;
+    const payload = try allocator.alloc(u8, payload_len);
+    defer allocator.free(payload);
+    @memset(payload, 'p');
+
+    for (0..6) |_| {
+        try buf.pushUndo(.{ .row = 0, .col = 0 });
+        try buf.insertBytesAt(.{ .row = 0, .col = 0 }, payload);
+    }
+    try buf.finalizePendingHistory(.{ .row = 0, .col = buf.lineLen(0) });
+
+    try std.testing.expect(buf.historyRetainedBytes() <= Buffer.MAX_HISTORY_BYTES);
+    try std.testing.expectEqual(@as(usize, 3), buf.history_current.depth);
+
+    var undo_count: usize = 0;
+    while (try buf.undo(.{ .row = 0, .col = 0 })) |_| {
+        undo_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), undo_count);
+}
+
+test "Buffer: superlarge tree-rope history stays within byte budget" {
+    const allocator = std.testing.allocator;
+
+    const base_len = 4 * 1024 * 1024;
+    const base = try allocator.alloc(u8, base_len);
+    defer allocator.free(base);
+    @memset(base, 'a');
+
+    var buf = try Buffer.initStrategy(allocator, .tree_rope, base);
+    defer buf.deinit();
+
+    const payload_len = 256 * 1024;
+    const payload = try allocator.alloc(u8, payload_len);
+    defer allocator.free(payload);
+    @memset(payload, 'b');
+
+    for (0..10) |_| {
+        try buf.pushUndo(.{ .row = 0, .col = 0 });
+        try buf.insertBytesAt(.{ .row = 0, .col = 0 }, payload);
+    }
+    try buf.finalizePendingHistory(.{ .row = 0, .col = buf.lineLen(0) });
+
+    try std.testing.expect(buf.historyRetainedBytes() <= Buffer.MAX_HISTORY_BYTES);
+    try std.testing.expect(buf.history_current.depth <= 4);
+    try std.testing.expect(buf.lineLen(0) >= base_len + (10 * payload_len));
+}

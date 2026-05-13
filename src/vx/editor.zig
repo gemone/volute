@@ -167,6 +167,14 @@ pub const Editor = struct {
         }
     }
 
+    pub fn insertTextBytes(self: *Self, bytes: []const u8) !void {
+        if (bytes.len == 0) return;
+        const buf = self.getBuffer() orelse return;
+        const insert_pos = buf.clampPosInsert(self.cursor);
+        try buf.insertBytesAt(insert_pos, bytes);
+        self.cursor = advancePositionByBytes(insert_pos, bytes);
+    }
+
     fn handleInsertKey(self: *Self, key: Key) !void {
         const buf = self.getBuffer() orelse return;
 
@@ -176,6 +184,8 @@ pub const Editor = struct {
             self.cursor = buf.clampPos(self.cursor);
             return;
         }
+
+        if (key.mod.ctrl or key.mod.alt) return;
 
         // Handle UTF-8 multi-byte sequences
         const utf8_bytes = key.getBytes();
@@ -919,7 +929,7 @@ pub const Editor = struct {
                 }
             },
             .redo => {
-                if (try buf.redo()) |pos| {
+                if (try buf.redo(self.cursor)) |pos| {
                     self.cursor = pos;
                 }
             },
@@ -1594,6 +1604,18 @@ test "handleInsertKey backspace removes an entire UTF-8 sequence" {
     try std.testing.expectEqual(Position{ .row = 0, .col = omega.len }, editor.cursor);
 }
 
+test "handleInsertKey ignores modified printable keys" {
+    var editor = try initTestEditor("");
+    defer deinitTestEditor(&editor);
+
+    try editor.handleInsertKey(Key.initCtrl(.lower_a));
+    try editor.handleInsertKey(Key.initAlt(.lower_x));
+    try editor.handleInsertKey(Key.init(.lower_b));
+
+    try expectEditorBufferText(&editor, "b");
+    try std.testing.expectEqual(Position{ .row = 0, .col = 1 }, editor.cursor);
+}
+
 test "normal mode yank and paste keep UTF-8 bytes intact" {
     const omega = [_]u8{ 0xCE, 0xA9 };
     const expected = [_]u8{ 0xCE, 0xA9, 0xCE, 0xA9, '!' };
@@ -1741,6 +1763,28 @@ test "append_mode inserts Chinese text after the full UTF-8 sequence" {
 
     try expectEditorBufferText(&editor, "A你好B");
     try std.testing.expectEqual(Position{ .row = 0, .col = 7 }, editor.cursor);
+}
+
+test "insertTextBytes inserts a burst and advances cursor once" {
+    var editor = try initTestEditor("hello");
+    defer deinitTestEditor(&editor);
+
+    try editor.executeCommand(.insert_at_line_end);
+    try editor.insertTextBytes(" world");
+
+    try expectEditorBufferText(&editor, "hello world");
+    try std.testing.expectEqual(Position{ .row = 0, .col = 11 }, editor.cursor);
+}
+
+test "insertTextBytes keeps UTF-8 bursts intact" {
+    var editor = try initTestEditor("");
+    defer deinitTestEditor(&editor);
+
+    try editor.executeCommand(.insert_mode);
+    try editor.insertTextBytes("A你B");
+
+    try expectEditorBufferText(&editor, "A你B");
+    try std.testing.expectEqual(Position{ .row = 0, .col = "A你B".len }, editor.cursor);
 }
 
 test "open_below_with_indent inserts a fresh line directly below the cursor" {
