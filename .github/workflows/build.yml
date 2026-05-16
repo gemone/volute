@@ -1,0 +1,118 @@
+name: Build
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+  merge_group:
+  schedule:
+    - cron: "00 01 * * *"
+
+env:
+  ZIG_VERSION: "0.16.0"
+  # This key can be changed to bust the cache of codec tables.
+  CODEC_CACHE_VERSION: ""
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Cache Zig dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            .zig-cache
+            zig-cache
+            zig-out
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-v${{ env.ZIG_VERSION }}-${{ env.CODEC_CACHE_VERSION }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-zig-v${{ env.ZIG_VERSION }}-
+            ${{ runner.os }}-${{ runner.arch }}-zig-
+
+      - name: Build project
+        run: zig build
+
+      - name: Run unit tests
+        run: zig build test
+
+  test:
+    name: Test Suite
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Cache Zig dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            .zig-cache
+            zig-cache
+            zig-out
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-v${{ env.ZIG_VERSION }}-${{ env.CODEC_CACHE_VERSION }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-zig-v${{ env.ZIG_VERSION }}-
+            ${{ runner.os }}-${{ runner.arch }}-zig-
+
+      - name: Build project
+        run: zig build
+
+      - name: Run unit tests
+        run: zig build test
+
+      - name: Run encoding validation tests
+        run: |
+          if command -v uv &> /dev/null; then
+            uv run pytest tests/test_encoding.py -v
+          else
+            echo "uv not found, skipping Python tests"
+          fi
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+  lints:
+    name: Lints
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Cache Zig dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            .zig-cache
+            zig-cache
+            zig-out
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-v${{ env.ZIG_VERSION }}-${{ env.CODEC_CACHE_VERSION }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-zig-v${{ env.ZIG_VERSION }}-
+            ${{ runner.os }}-${{ runner.arch }}-zig-
+
+      - name: Check build
+        run: zig build
+
+      - name: Run tests
+        run: zig build test

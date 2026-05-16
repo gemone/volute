@@ -1,0 +1,39 @@
+name: Encoding Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+    paths:
+      - 'src/codecs/**'
+      - 'src/vx/line_ending.zig'
+      - 'tests/test_encoding*.py'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - '.github/workflows/encoding-test.yml'
+
+jobs:
+  encoding-test:
+    name: Encode/Decode Correctness
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+
+      - name: Install Zig 0.16.0
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: "0.16.0"
+
+      - name: Build vx
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Run unit tests
+        run: zig build test
+
+      - name: Install pytest
+        run: pip install pytest
+
+      - name: Run encoding correctness tests
+        run: python3 -m pytest tests/test_encoding.py -v
