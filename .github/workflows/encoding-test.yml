@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - master
+      - refactor/zzz
     paths:
       - 'src/codecs/**'
       - 'src/vx/line_ending.zig'
