@@ -8,7 +8,13 @@ const Terminal = @import("terminal.zig").Terminal;
 const CursorStyle = @import("terminal.zig").CursorStyle;
 const keymap = @import("keymap.zig");
 const Command = keymap.Command;
+const encoding_mod = @import("../codecs/encoding.zig");
+const line_ending_mod = @import("line_ending.zig");
 const SearchDirection = enum { forward, backward };
+const SearchMatch = struct {
+    start: Position,
+    end: Position,
+};
 const SurroundPair = struct {
     open: u8,
     close: u8,
@@ -31,6 +37,7 @@ pub const Editor = struct {
     mode: Mode,
     cursor: Position,
     selection: ?Selection,
+    selection_linewise: bool,
     scroll: usize,
     pending_keys: std.ArrayList(Key),
     pending_trie_name: []const u8,
@@ -42,6 +49,7 @@ pub const Editor = struct {
     pending_numeric_command: ?Command,
     should_quit: bool,
     yank_text: ?[]const u8,
+    yank_linewise: bool,
     search_pattern: ?[]const u8,
     in_char_pending: bool,
     pending_char_command: ?Command,
@@ -60,6 +68,10 @@ pub const Editor = struct {
     last_render_cursor: Position,
     last_render_mode: Mode,
     last_render_selection: ?Selection,
+    /// Ordered encoding probe list used when opening files.
+    /// Mirrors Vim's `fileencodings` option.  null = use encoding.default_fileencodings.
+    /// Owned by the editor (heap-allocated); replaced by `:set fencs=<list>`.
+    fileencodings: ?[]const encoding_mod.Encoding,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !Self {
         var terminal = try Terminal.init(io);
@@ -74,6 +86,7 @@ pub const Editor = struct {
             .mode = .normal,
             .cursor = .{},
             .selection = null,
+            .selection_linewise = false,
             .scroll = 0,
             .pending_keys = .empty,
             .pending_trie_name = "",
@@ -85,6 +98,7 @@ pub const Editor = struct {
             .pending_numeric_command = null,
             .should_quit = false,
             .yank_text = null,
+            .yank_linewise = false,
             .search_pattern = null,
             .in_char_pending = false,
             .pending_char_command = null,
@@ -103,6 +117,7 @@ pub const Editor = struct {
             .last_render_cursor = .{},
             .last_render_mode = .normal,
             .last_render_selection = null,
+            .fileencodings = null,
         };
     }
 
@@ -114,11 +129,23 @@ pub const Editor = struct {
         if (self.yank_text) |t| self.allocator.free(t);
         if (self.search_pattern) |p| self.allocator.free(p);
         if (self.status_msg) |m| self.allocator.free(m);
+        if (self.fileencodings) |fe| self.allocator.free(fe);
         self.terminal.deinit();
     }
 
     pub fn openFile(self: *Self, path: []const u8) !void {
-        const buf = try Buffer.openFile(self.allocator, self.io, path);
+        const buf = try Buffer.openFileWithOptions(self.allocator, self.io, path, self.fileencodings);
+        try self.buffers.append(self.allocator, buf);
+        self.current_buf = self.buffers.items.len - 1;
+        self.cursor = .{};
+        self.scroll = 0;
+    }
+
+    /// Open a file with a forced encoding (skips auto-detection).
+    /// Used when `-e <enc>` is passed on the command line in TUI mode.
+    pub fn openFileForced(self: *Self, path: []const u8, enc: encoding_mod.Encoding) !void {
+        const forced_list = [_]encoding_mod.Encoding{enc};
+        const buf = try Buffer.openFileWithOptions(self.allocator, self.io, path, &forced_list);
         try self.buffers.append(self.allocator, buf);
         self.current_buf = self.buffers.items.len - 1;
         self.cursor = .{};
@@ -167,6 +194,13 @@ pub const Editor = struct {
         }
     }
 
+    fn changeSelection(self: *Self, yank: bool) !void {
+        const buf = self.getBuffer() orelse return;
+        try self.deleteSelection(yank);
+        self.setMode(.insert);
+        self.cursor = buf.clampPosInsert(self.cursor);
+    }
+
     pub fn insertTextBytes(self: *Self, bytes: []const u8) !void {
         if (bytes.len == 0) return;
         const buf = self.getBuffer() orelse return;
@@ -192,7 +226,7 @@ pub const Editor = struct {
         if (utf8_bytes.len > 0) {
             const insert_pos = buf.clampPosInsert(self.cursor);
             try buf.insertBytesAt(insert_pos, utf8_bytes);
-            self.cursor.col += utf8_bytes.len;
+            self.cursor = advancePositionByBytes(insert_pos, utf8_bytes);
             return;
         }
 
@@ -259,6 +293,7 @@ pub const Editor = struct {
             self.pending_trie_name = "";
             self.setMode(.normal);
             self.selection = null;
+            self.selection_linewise = false;
             return;
         }
 
@@ -342,31 +377,23 @@ pub const Editor = struct {
             return;
         }
 
-        const ch = key.char();
-        if (ch == null) {
-            self.in_char_pending = false;
-            self.pending_char_command = null;
-            return;
-        }
-        const target = ch.?;
         self.in_char_pending = false;
         self.pending_char_command = null;
 
         switch (cmd) {
             .find_next_char, .find_till_char, .find_prev_char, .till_prev_char => {
+                const target = key.char() orelse return;
                 self.last_find_char = target;
                 self.last_find_command = cmd;
                 try self.executeFindChar(cmd, target);
             },
-            .surround_add => try self.applySurroundAdd(target),
-            .surround_replace => try self.applySurroundReplace(target),
+            .surround_add => try self.applySurroundAdd(key.char() orelse return),
+            .surround_replace => try self.applySurroundReplace(key.char() orelse return),
             .replace => {
-                const buf = self.getBuffer() orelse return;
-                try buf.pushUndo(self.cursor);
-                const line = buf.getLine(self.cursor.row) orelse return;
-                if (self.cursor.col < line.len) {
-                    try buf.replaceCharAt(self.cursor.row, self.cursor.col, target);
-                }
+                var ascii_buf: [1]u8 = undefined;
+                const target = keyInputBytes(key, &ascii_buf);
+                if (target.len == 0) return;
+                try self.replaceSelectionWithBytes(target);
             },
             else => {},
         }
@@ -374,48 +401,21 @@ pub const Editor = struct {
 
     fn executeFindChar(self: *Self, cmd: Command, target: u8) !void {
         const buf = self.getBuffer() orelse return;
-        const line = buf.getLine(self.cursor.row) orelse return;
 
         switch (cmd) {
             .find_next_char => {
-                var col = self.cursor.col + 1;
-                while (col < line.len) : (col += 1) {
-                    if (line[col] == target) {
-                        self.cursor.col = col;
-                        return;
-                    }
-                }
+                self.cursor = findNextChar(buf, self.cursor, target) orelse self.cursor;
             },
             .find_till_char => {
-                var col = self.cursor.col + 1;
-                while (col < line.len) : (col += 1) {
-                    if (line[col] == target) {
-                        self.cursor.col = col -| 1;
-                        return;
-                    }
-                }
+                const found = findNextChar(buf, self.cursor, target) orelse return;
+                self.cursor = prevCharPosition(buf, found) orelse self.cursor;
             },
             .find_prev_char => {
-                if (self.cursor.col == 0) return;
-                var col: usize = self.cursor.col - 1;
-                while (true) : (col -= 1) {
-                    if (line[col] == target) {
-                        self.cursor.col = col;
-                        return;
-                    }
-                    if (col == 0) break;
-                }
+                self.cursor = findPrevChar(buf, self.cursor, target) orelse self.cursor;
             },
             .till_prev_char => {
-                if (self.cursor.col <= 1) return;
-                var col: usize = self.cursor.col - 1;
-                while (true) : (col -= 1) {
-                    if (line[col] == target) {
-                        if (col + 1 < line.len) self.cursor.col = col + 1;
-                        return;
-                    }
-                    if (col == 0) break;
-                }
+                const found = findPrevChar(buf, self.cursor, target) orelse return;
+                self.cursor = nextCharPosition(buf, found) orelse self.cursor;
             },
             else => {},
         }
@@ -488,15 +488,164 @@ pub const Editor = struct {
                 try self.openFile(path);
                 self.setStatus("Opened: {s}", .{path});
             }
+        } else if (std.mem.startsWith(u8, cmd, "e ") or std.mem.startsWith(u8, cmd, "edit ")) {
+            // :e ++enc=<name> [path]  — reload current file (or open path) with explicit encoding
+            const arg = std.mem.trim(u8, cmd[if (cmd[1] == ' ') 2 else 5 ..], " ");
+            if (std.mem.startsWith(u8, arg, "++enc=")) {
+                const rest = arg[6..];
+                const space = std.mem.indexOfScalar(u8, rest, ' ');
+                const enc_name = if (space) |s| rest[0..s] else rest;
+                const path_arg = if (space) |s| std.mem.trim(u8, rest[s + 1 ..], " ") else "";
+                if (encoding_mod.Encoding.fromName(enc_name)) |enc| {
+                    if (path_arg.len > 0) {
+                        // Open a new file, forcing decode with the specified encoding.
+                        // Pass a single-element list so auto-detection is bypassed entirely.
+                        const forced: []const encoding_mod.Encoding = &.{enc};
+                        const buf = try Buffer.openFileWithOptions(self.allocator, self.io, path_arg, forced);
+                        try self.buffers.append(self.allocator, buf);
+                        self.current_buf = self.buffers.items.len - 1;
+                        self.cursor = .{};
+                        self.scroll = 0;
+                        self.setStatus("Opened {s} as {s}", .{ path_arg, enc.displayName() });
+                    } else {
+                        // Revert current buffer with specified encoding
+                        const buf = self.getBuffer() orelse {
+                            self.setStatusText("No buffer");
+                            return;
+                        };
+                        buf.revertWithEncoding(self.io, enc) catch |err| {
+                            self.setStatus("Revert failed: {}", .{err});
+                            return;
+                        };
+                        self.cursor = .{};
+                        self.scroll = 0;
+                        self.setStatus("Reloaded as {s}", .{enc.displayName()});
+                    }
+                } else {
+                    self.setStatus("Unknown encoding: {s}", .{enc_name});
+                }
+            } else if (arg.len > 0) {
+                try self.openFile(arg);
+                self.setStatus("Opened: {s}", .{arg});
+            }
         } else if (std.mem.eql(u8, cmd, "n") or std.mem.eql(u8, cmd, "new")) {
             try self.openNewBuffer();
         } else if (std.mem.eql(u8, cmd, "bn") or std.mem.eql(u8, cmd, "bnext")) {
             try self.executeCommand(.buffer_next);
         } else if (std.mem.eql(u8, cmd, "bp") or std.mem.eql(u8, cmd, "bprev")) {
             try self.executeCommand(.buffer_prev);
+        } else if (std.mem.startsWith(u8, cmd, "set ")) {
+            self.executeSetCommand(cmd[4..]);
         } else {
             self.setStatus("Unknown command: {s}", .{cmd});
         }
+    }
+
+    /// Handle `:set <option>[=<value>]` or `:set <option>?` sub-commands.
+    fn executeSetCommand(self: *Self, arg: []const u8) void {
+        const buf = self.getBuffer() orelse {
+            self.setStatusText("No buffer");
+            return;
+        };
+        const trimmed = std.mem.trim(u8, arg, " ");
+
+        // Query commands: :set fenc?  :set ff?  :set fencs?
+        if (std.mem.eql(u8, trimmed, "fenc?") or std.mem.eql(u8, trimmed, "fileencoding?")) {
+            self.setStatus("fileencoding={s}", .{buf.file_encoding.displayName()});
+            return;
+        }
+        if (std.mem.eql(u8, trimmed, "ff?") or std.mem.eql(u8, trimmed, "fileformat?")) {
+            self.setStatus("fileformat={s}", .{buf.file_line_ending.displayName()});
+            return;
+        }
+        if (std.mem.eql(u8, trimmed, "fencs?") or std.mem.eql(u8, trimmed, "fileencodings?")) {
+            const list = self.fileencodings orelse encoding_mod.default_fileencodings;
+            var out = std.ArrayList(u8).empty;
+            defer out.deinit(self.allocator);
+            out.appendSlice(self.allocator, "fencs=") catch {};
+            for (list, 0..) |enc, i| {
+                if (i > 0) out.append(self.allocator, ',') catch {};
+                out.appendSlice(self.allocator, enc.displayName()) catch {};
+            }
+            self.setStatusText(out.items);
+            return;
+        }
+        if (std.mem.eql(u8, trimmed, "bomb")) {
+            buf.has_bom = true;
+            buf.dirty = true;
+            self.setStatusText("BOM enabled");
+            return;
+        }
+        if (std.mem.eql(u8, trimmed, "nobomb")) {
+            buf.has_bom = false;
+            buf.dirty = true;
+            self.setStatusText("BOM disabled");
+            return;
+        }
+
+        // Assignment commands: :set fenc=utf-8  :set ff=unix
+        if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq_idx| {
+            const key = trimmed[0..eq_idx];
+            const value = trimmed[eq_idx + 1 ..];
+            if (std.mem.eql(u8, key, "fenc") or std.mem.eql(u8, key, "fileencoding")) {
+                if (encoding_mod.Encoding.fromName(value)) |enc| {
+                    buf.file_encoding = enc;
+                    buf.has_bom = (enc == .utf8bom);
+                    buf.dirty = true;
+                    self.setStatus("fileencoding={s}", .{enc.displayName()});
+                } else {
+                    self.setStatus("Unknown encoding: {s}", .{value});
+                }
+                return;
+            }
+            if (std.mem.eql(u8, key, "fencs") or std.mem.eql(u8, key, "fileencodings")) {
+                // Parse comma-separated encoding list e.g. "utf-8,gbk,latin1"
+                var list = std.ArrayListUnmanaged(encoding_mod.Encoding).empty;
+                defer list.deinit(self.allocator);
+                var it = std.mem.splitScalar(u8, value, ',');
+                var bad: ?[]const u8 = null;
+                while (it.next()) |token| {
+                    const name = std.mem.trim(u8, token, " ");
+                    if (name.len == 0) continue;
+                    if (encoding_mod.Encoding.fromName(name)) |enc| {
+                        list.append(self.allocator, enc) catch {};
+                    } else {
+                        bad = name;
+                        break;
+                    }
+                }
+                if (bad) |name| {
+                    self.setStatus("Unknown encoding in fencs: {s}", .{name});
+                } else if (list.items.len == 0) {
+                    // Empty list → reset to default
+                    if (self.fileencodings) |fe| self.allocator.free(fe);
+                    self.fileencodings = null;
+                    self.setStatusText("fencs reset to default");
+                } else {
+                    if (self.fileencodings) |fe| self.allocator.free(fe);
+                    self.fileencodings = list.toOwnedSlice(self.allocator) catch null;
+                    self.setStatus("fencs={s}", .{value});
+                }
+                return;
+            }
+            if (std.mem.eql(u8, key, "ff") or std.mem.eql(u8, key, "fileformat")) {
+                const le: ?line_ending_mod.LineEnding =
+                    if (std.mem.eql(u8, value, "unix")) .lf
+                    else if (std.mem.eql(u8, value, "dos")) .crlf
+                    else if (std.mem.eql(u8, value, "mac")) .cr
+                    else null;
+                if (le) |l| {
+                    buf.file_line_ending = l;
+                    buf.dirty = true;
+                    self.setStatus("fileformat={s}", .{value});
+                } else {
+                    self.setStatus("Unknown fileformat: {s} (use unix/dos/mac)", .{value});
+                }
+                return;
+            }
+        }
+
+        self.setStatus("Unknown option: {s}", .{trimmed});
     }
 
     fn clearStatus(self: *Self) void {
@@ -576,6 +725,171 @@ pub const Editor = struct {
         return .{ .start = self.cursor.row, .end = self.cursor.row };
     }
 
+    fn clearYankText(self: *Self) void {
+        if (self.yank_text) |text| self.allocator.free(text);
+        self.yank_text = null;
+        self.yank_linewise = false;
+    }
+
+    fn setYankText(self: *Self, text: []const u8, linewise: bool) !void {
+        self.clearYankText();
+        self.yank_text = try self.allocator.dupe(u8, text);
+        self.yank_linewise = linewise;
+    }
+
+    fn selectionIsLinewise(self: *const Self) bool {
+        return self.selection != null and self.selection_linewise;
+    }
+
+    fn copySelectedLines(self: *Self, buf: *Buffer) ![]u8 {
+        const rows = self.selectedLineRange();
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(self.allocator);
+
+        var row = rows.start;
+        while (row <= rows.end) : (row += 1) {
+            const line = buf.getLine(row) orelse "";
+            try out.appendSlice(self.allocator, line);
+            if (row < rows.end) try out.append(self.allocator, '\n');
+        }
+        return try out.toOwnedSlice(self.allocator);
+    }
+
+    fn copySelectionText(self: *Self, buf: *Buffer) ![]u8 {
+        if (self.selectionIsLinewise()) {
+            return try self.copySelectedLines(buf);
+        }
+        const range = self.selectedTextRange(buf);
+        return try buf.copyRange(range.start, range.end);
+    }
+
+    fn replaceSelectionBytes(self: *Self, buf: *Buffer, bytes: []const u8, force_linewise: bool) !void {
+        if (self.selection == null) return;
+
+        if (force_linewise or self.selectionIsLinewise()) {
+            const rows = self.selectedLineRange();
+            try buf.deleteLines(rows.start, rows.end + 1);
+            try insertTextAsLines(buf, rows.start, bytes);
+            self.cursor = .{ .row = rows.start, .col = 0 };
+        } else {
+            const range = self.selectedTextRange(buf);
+            try buf.replaceTextRange(range.start, range.end, bytes);
+            self.cursor = advancePositionByBytes(range.start, bytes);
+        }
+
+        self.selection = null;
+        self.selection_linewise = false;
+        self.setMode(.normal);
+        self.cursor = buf.clampPos(self.cursor);
+    }
+
+    fn pasteYank(self: *Self, after: bool) !void {
+        const buf = self.getBuffer() orelse return;
+        const text = self.yank_text orelse return;
+
+        try buf.pushUndo(self.cursor);
+
+        if (self.selection != null) {
+            try self.replaceSelectionBytes(buf, text, self.yank_linewise);
+            return;
+        }
+
+        if (self.yank_linewise) {
+            const insert_row = if (after) self.cursor.row + 1 else self.cursor.row;
+            try insertTextAsLines(buf, insert_row, text);
+            self.cursor = .{ .row = insert_row, .col = 0 };
+            self.cursor = buf.clampPos(self.cursor);
+            return;
+        }
+
+        const insert_pos = self.pasteCharwiseInsertPosition(buf, after);
+        try buf.insertBytesAt(insert_pos, text);
+        self.cursor = buf.clampPos(advancePositionByBytes(insert_pos, text));
+    }
+
+    fn pasteCharwiseInsertPosition(self: *const Self, buf: *Buffer, after: bool) Position {
+        const cursor = buf.clampPos(self.cursor);
+        if (!after) return buf.clampPosInsert(cursor);
+
+        const line = buf.getLine(cursor.row) orelse "";
+        if (line.len == 0 or cursor.col >= line.len) {
+            return .{ .row = cursor.row, .col = line.len };
+        }
+        return .{ .row = cursor.row, .col = buf.nextColumn(cursor.row, cursor.col) };
+    }
+
+    fn replaceSelectionWithBytes(self: *Self, target: []const u8) !void {
+        if (target.len == 0 or (target.len == 1 and target[0] == '\n')) return;
+        const buf = self.getBuffer() orelse return;
+        if (self.selection == null) {
+            try buf.pushUndo(self.cursor);
+            const line = buf.getLine(self.cursor.row) orelse return;
+            if (self.cursor.col < line.len) {
+                try buf.replaceBytesAt(self.cursor.row, self.cursor.col, target);
+            }
+            return;
+        }
+
+        const source = try self.copySelectionText(buf);
+        defer self.allocator.free(source);
+
+        var replaced: std.ArrayList(u8) = .empty;
+        defer replaced.deinit(self.allocator);
+        var i: usize = 0;
+        while (i < source.len) : (i += 1) {
+            const byte = source[i];
+            if (byte == '\n') {
+                try replaced.append(self.allocator, '\n');
+            } else if ((byte & 0b1100_0000) != 0b1000_0000) {
+                try replaced.appendSlice(self.allocator, target);
+            }
+        }
+
+        try buf.pushUndo(self.cursor);
+        try self.replaceSelectionBytes(buf, replaced.items, self.selectionIsLinewise());
+    }
+
+    const CaseTransform = enum { toggle, lower, upper };
+
+    fn applyCaseShift(ch: u8, transform: CaseTransform) u8 {
+        return switch (transform) {
+            .toggle => if (ch >= 'a' and ch <= 'z') ch - 32 else if (ch >= 'A' and ch <= 'Z') ch + 32 else ch,
+            .lower => if (ch >= 'A' and ch <= 'Z') ch + 32 else ch,
+            .upper => if (ch >= 'a' and ch <= 'z') ch - 32 else ch,
+        };
+    }
+
+    fn transformSelectionCase(self: *Self, transform: CaseTransform) !void {
+        const buf = self.getBuffer() orelse return;
+        if (self.selection == null) {
+            try buf.pushUndo(self.cursor);
+            const line = buf.getLine(self.cursor.row) orelse return;
+            if (self.cursor.col >= line.len) return;
+            try buf.replaceCharAt(self.cursor.row, self.cursor.col, applyCaseShift(line[self.cursor.col], transform));
+            return;
+        }
+
+        const source = try self.copySelectionText(buf);
+        defer self.allocator.free(source);
+
+        for (source) |*ch| {
+            ch.* = applyCaseShift(ch.*, transform);
+        }
+
+        try buf.pushUndo(self.cursor);
+        try self.replaceSelectionBytes(buf, source, self.selectionIsLinewise());
+    }
+
+    fn linewiseSelectionForRows(self: *Self, start_row: usize, end_row: usize, buf: *Buffer) void {
+        self.setMode(.select_);
+        self.selection_linewise = true;
+        self.selection = .{
+            .anchor = .{ .row = start_row, .col = 0 },
+            .cursor = .{ .row = end_row, .col = buf.lineLen(end_row) },
+        };
+        self.cursor = self.selection.?.cursor;
+    }
+
     fn selectedTextRange(self: *const Self, buf: *Buffer) struct { start: Position, end: Position } {
         if (self.selection) |sel| {
             const start = sel.start();
@@ -616,6 +930,25 @@ pub const Editor = struct {
             .start = .{ .row = self.cursor.row, .col = self.cursor.col -| 1 },
             .end = self.cursor,
         };
+    }
+
+    fn searchMatch(buf: *Buffer, pattern: []const u8, start: Position, direction: SearchDirection, skip_current: bool) ?SearchMatch {
+        const match_start = searchBuffer(buf, pattern, start, direction, skip_current) orelse return null;
+        return .{
+            .start = match_start,
+            .end = advancePositionByBytes(match_start, pattern),
+        };
+    }
+
+    fn selectSearchMatch(self: *Self, buf: *Buffer, match: SearchMatch) void {
+        const end_cursor = prevCharPositionFromEnd(buf, match.start, match.end);
+        self.setMode(.select_);
+        self.selection_linewise = false;
+        self.selection = .{
+            .anchor = match.start,
+            .cursor = end_cursor,
+        };
+        self.cursor = end_cursor;
     }
 
     fn applySurroundAdd(self: *Self, target: u8) !void {
@@ -702,20 +1035,42 @@ pub const Editor = struct {
     fn deleteSelection(self: *Self, yank: bool) !void {
         const buf = self.getBuffer() orelse return;
 
+        if (self.selection) |_| {
+            if (yank) {
+                const text = try self.copySelectionText(buf);
+                defer self.allocator.free(text);
+                try self.setYankText(text, self.selectionIsLinewise());
+            }
+
+            try buf.pushUndo(self.cursor);
+            if (self.selectionIsLinewise()) {
+                const rows = self.selectedLineRange();
+                try buf.deleteLines(rows.start, rows.end + 1);
+                self.cursor = .{ .row = @min(rows.start, buf.lineCount() -| 1), .col = 0 };
+            } else {
+                const range = self.selectedTextRange(buf);
+                try buf.replaceTextRange(range.start, range.end, "");
+                self.cursor = range.start;
+            }
+            self.selection = null;
+            self.selection_linewise = false;
+            self.setMode(.normal);
+            self.cursor = buf.clampPos(self.cursor);
+            return;
+        }
+
         try buf.pushUndo(self.cursor);
         const line = buf.getLine(self.cursor.row) orelse return;
         if (line.len > 0) {
             const ch = buf.charSliceAt(self.cursor) orelse return;
             if (yank) {
-                if (self.yank_text) |t| self.allocator.free(t);
-                self.yank_text = try self.allocator.dupe(u8, ch);
+                try self.setYankText(ch, false);
             }
             _ = try buf.deleteCharAt(.{ .row = self.cursor.row, .col = self.cursor.col + 1 });
             self.cursor = buf.clampPos(self.cursor);
         } else if (buf.lineCount() > 1) {
             if (yank) {
-                if (self.yank_text) |t| self.allocator.free(t);
-                self.yank_text = try self.allocator.dupe(u8, "\n");
+                try self.setYankText("\n", true);
             }
             try buf.deleteLine(self.cursor.row);
             self.cursor = buf.clampPos(self.cursor);
@@ -877,52 +1232,40 @@ pub const Editor = struct {
             .normal_mode => {
                 self.setMode(.normal);
                 self.selection = null;
+                self.selection_linewise = false;
                 self.cursor = buf.clampPos(self.cursor);
                 if (self.cursor.col >= buf.lineLen(self.cursor.row)) self.cursor.col = normalLineEndCol(buf, self.cursor.row);
             },
             .select_mode => {
                 self.setMode(.select_);
+                self.selection_linewise = false;
                 self.selection = Selection.init(self.cursor);
             },
 
             .delete_selection => try self.deleteSelection(true),
             .delete_selection_noyank => try self.deleteSelection(false),
-            .change_selection => {
-                try buf.pushUndo(self.cursor);
-                try self.executeCommand(.delete_selection);
-                try self.executeCommand(.insert_mode);
-            },
-            .change_selection_noyank => {
-                try buf.pushUndo(self.cursor);
-                try self.executeCommand(.delete_selection_noyank);
-                try self.executeCommand(.insert_mode);
-            },
+            .change_selection => try self.changeSelection(true),
+            .change_selection_noyank => try self.changeSelection(false),
             .yank => {
-                const line = buf.getLine(self.cursor.row) orelse return;
-                if (self.yank_text) |t| self.allocator.free(t);
-                if (line.len > 0 and self.cursor.col < line.len) {
-                    const ch = buf.charSliceAt(self.cursor) orelse return;
-                    self.yank_text = try self.allocator.dupe(u8, ch);
+                if (self.selection != null) {
+                    const text = try self.copySelectionText(buf);
+                    defer self.allocator.free(text);
+                    try self.setYankText(text, self.selectionIsLinewise());
+                    self.selection = null;
+                    self.selection_linewise = false;
+                    self.setMode(.normal);
                 } else {
-                    self.yank_text = try self.allocator.dupe(u8, line);
+                    const line = buf.getLine(self.cursor.row) orelse return;
+                    if (line.len > 0 and self.cursor.col < line.len) {
+                        const ch = buf.charSliceAt(self.cursor) orelse return;
+                        try self.setYankText(ch, false);
+                    } else {
+                        try self.setYankText(line, false);
+                    }
                 }
             },
-            .paste_after => {
-                try buf.pushUndo(self.cursor);
-                if (self.yank_text) |text| {
-                    const insert_pos = buf.clampPosInsert(self.cursor);
-                    try buf.insertBytesAt(insert_pos, text);
-                    self.cursor = advancePositionByBytes(insert_pos, text);
-                }
-            },
-            .paste_before => {
-                try buf.pushUndo(self.cursor);
-                if (self.yank_text != null) {
-                    if (self.cursor.col > 0) self.cursor.col = buf.prevColumn(self.cursor.row, self.cursor.col);
-                    try self.executeCommand(.paste_after);
-                    if (self.cursor.col > 0) self.cursor.col = buf.prevColumn(self.cursor.row, self.cursor.col);
-                }
-            },
+            .paste_after => try self.pasteYank(true),
+            .paste_before => try self.pasteYank(false),
             .undo => {
                 if (try buf.undo(self.cursor)) |pos| {
                     self.cursor = pos;
@@ -951,60 +1294,41 @@ pub const Editor = struct {
                 self.pending_char_command = .replace;
             },
             .replace_with_yanked => {
-                try buf.pushUndo(self.cursor);
                 if (self.yank_text) |text| {
-                    const replacement = leadingUtf8Char(text);
-                    if (replacement.len > 0 and replacement[0] != '\n') {
-                        try buf.replaceBytesAt(self.cursor.row, self.cursor.col, replacement);
+                    try buf.pushUndo(self.cursor);
+                    if (self.selection != null) {
+                        try self.replaceSelectionBytes(buf, text, self.yank_linewise);
+                    } else {
+                        const range = self.selectedTextRange(buf);
+                        try buf.replaceTextRange(range.start, range.end, text);
+                        self.cursor = buf.clampPos(advancePositionByBytes(range.start, text));
                     }
                 }
             },
-            .switch_case => {
-                try buf.pushUndo(self.cursor);
-                const line = buf.getLine(self.cursor.row) orelse return;
-                if (self.cursor.col < line.len) {
-                    const ch = line[self.cursor.col];
-                    const new_ch = if (ch >= 'a' and ch <= 'z') ch - 32 else if (ch >= 'A' and ch <= 'Z') ch + 32 else ch;
-                    try buf.replaceCharAt(self.cursor.row, self.cursor.col, new_ch);
-                }
-            },
-            .switch_to_lowercase => {
-                try buf.pushUndo(self.cursor);
-                const line = buf.getLine(self.cursor.row) orelse return;
-                if (self.cursor.col < line.len) {
-                    const ch = line[self.cursor.col];
-                    if (ch >= 'A' and ch <= 'Z') try buf.replaceCharAt(self.cursor.row, self.cursor.col, ch + 32);
-                }
-            },
-            .switch_to_uppercase => {
-                try buf.pushUndo(self.cursor);
-                const line = buf.getLine(self.cursor.row) orelse return;
-                if (self.cursor.col < line.len) {
-                    const ch = line[self.cursor.col];
-                    if (ch >= 'a' and ch <= 'z') try buf.replaceCharAt(self.cursor.row, self.cursor.col, ch - 32);
-                }
-            },
+            .switch_case => try self.transformSelectionCase(.toggle),
+            .switch_to_lowercase => try self.transformSelectionCase(.lower),
+            .switch_to_uppercase => try self.transformSelectionCase(.upper),
             .extend_line_below => {
-                self.selection = Selection{
-                    .anchor = self.cursor,
-                    .cursor = .{ .row = @min(self.cursor.row + 1, buf.lineCount() -| 1), .col = self.cursor.col },
-                };
-                self.cursor = self.selection.?.cursor;
+                if (self.selection != null) {
+                    const rows = self.selectedLineRange();
+                    self.linewiseSelectionForRows(rows.start, @min(rows.end + 1, buf.lineCount() -| 1), buf);
+                } else {
+                    self.linewiseSelectionForRows(self.cursor.row, self.cursor.row, buf);
+                }
             },
             .extend_to_line_bounds => {
                 const rows = self.selectedLineRange();
-                self.selection = .{
-                    .anchor = .{ .row = rows.start, .col = 0 },
-                    .cursor = .{ .row = rows.end, .col = buf.lineLen(rows.end) },
-                };
-                self.cursor = self.selection.?.cursor;
+                self.linewiseSelectionForRows(rows.start, rows.end, buf);
             },
             .select_all => {
                 const last_row = buf.lineCount() -| 1;
-                self.selection = Selection{ .anchor = .{}, .cursor = .{ .row = last_row, .col = buf.lineLen(last_row) } };
-                self.cursor = self.selection.?.cursor;
+                self.linewiseSelectionForRows(0, last_row, buf);
             },
-            .collapse_selection => self.selection = null,
+            .collapse_selection => {
+                self.selection = null;
+                self.selection_linewise = false;
+                self.setMode(.normal);
+            },
             .flip_selections => {
                 if (self.selection) |sel| {
                     self.cursor = sel.anchor;
@@ -1040,8 +1364,8 @@ pub const Editor = struct {
                 if (self.search_pattern) |pattern| {
                     if (pattern.len > 0) {
                         const start = advanceSearchPosition(buf, self.cursor, self.search_direction) orelse self.cursor;
-                        if (searchBuffer(buf, pattern, start, self.search_direction, false)) |pos| {
-                            self.cursor = pos;
+                        if (searchMatch(buf, pattern, start, self.search_direction, false)) |match| {
+                            self.selectSearchMatch(buf, match);
                         }
                     }
                 }
@@ -1051,8 +1375,8 @@ pub const Editor = struct {
                     if (pattern.len > 0) {
                         const direction: SearchDirection = if (self.search_direction == .forward) .backward else .forward;
                         const start = advanceSearchPosition(buf, self.cursor, direction) orelse self.cursor;
-                        if (searchBuffer(buf, pattern, start, direction, false)) |pos| {
-                            self.cursor = pos;
+                        if (searchMatch(buf, pattern, start, direction, false)) |match| {
+                            self.selectSearchMatch(buf, match);
                         }
                     }
                 }
@@ -1466,31 +1790,110 @@ fn normalLineEndCol(buf: *Buffer, row: usize) usize {
     return buf.prevColumn(row, len);
 }
 
+fn insertTextAsLines(buf: *Buffer, start_row: usize, text: []const u8) !void {
+    if (text.len == 0) return;
+    var row = start_row;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        try buf.insertLine(row, line);
+        row += 1;
+    }
+}
+
+fn keyInputBytes(key: Key, ascii_buf: *[1]u8) []const u8 {
+    const utf8_bytes = key.getBytes();
+    if (utf8_bytes.len > 0) return utf8_bytes;
+    if (key.char()) |ch| {
+        ascii_buf[0] = ch;
+        return ascii_buf[0..1];
+    }
+    return &[0]u8{};
+}
+
 fn advancePositionByBytes(start: Position, bytes: []const u8) Position {
     var pos = start;
-    for (bytes) |byte| {
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const byte = bytes[i];
         if (byte == '\n') {
             pos.row += 1;
             pos.col = 0;
+            i += 1;
         } else {
-            pos.col += 1;
+            const seq_len = utf8SequenceLen(bytes, i);
+            pos.col += seq_len;
+            i += seq_len;
         }
     }
     return pos;
 }
 
-fn leadingUtf8Char(bytes: []const u8) []const u8 {
-    if (bytes.len == 0) return bytes;
+fn utf8SequenceLen(bytes: []const u8, start: usize) usize {
+    if (start >= bytes.len) return 0;
 
-    const len = std.unicode.utf8ByteSequenceLength(bytes[0]) catch return bytes[0..1];
-    if (len > bytes.len) return bytes[0..1];
+    const byte = bytes[start];
+    if ((byte & 0b1100_0000) == 0b1000_0000) return 1;
 
-    var idx: usize = 1;
-    while (idx < len) : (idx += 1) {
-        if ((bytes[idx] & 0xC0) != 0x80) return bytes[0..1];
+    const expected = std.unicode.utf8ByteSequenceLength(byte) catch return 1;
+    if (start + expected > bytes.len) return 1;
+
+    var i: usize = 1;
+    while (i < expected) : (i += 1) {
+        if ((bytes[start + i] & 0b1100_0000) != 0b1000_0000) return 1;
     }
 
-    return bytes[0..len];
+    return expected;
+}
+
+fn prevCharPosition(buf: *Buffer, pos: Position) ?Position {
+    var row = pos.row;
+    var col = pos.col;
+    if (row >= buf.lineCount()) return null;
+
+    if (col > 0) return .{ .row = row, .col = buf.prevColumn(row, col) };
+
+    while (row > 0) {
+        row -= 1;
+        col = buf.lineLen(row);
+        if (col > 0) return .{ .row = row, .col = buf.prevColumn(row, col) };
+    }
+
+    return null;
+}
+
+fn nextCharPosition(buf: *Buffer, pos: Position) ?Position {
+    if (pos.row >= buf.lineCount()) return null;
+
+    const line = buf.getLine(pos.row) orelse return null;
+    const next_col = buf.nextColumn(pos.row, pos.col);
+    if (next_col < line.len) return .{ .row = pos.row, .col = next_col };
+
+    var row = pos.row + 1;
+    while (row < buf.lineCount()) : (row += 1) {
+        if (buf.lineLen(row) > 0) return .{ .row = row, .col = 0 };
+    }
+
+    return null;
+}
+
+fn prevCharPositionFromEnd(buf: *Buffer, start: Position, end: Position) Position {
+    return prevCharPosition(buf, end) orelse start;
+}
+
+fn findNextChar(buf: *Buffer, start: Position, target: u8) ?Position {
+    var pos = nextCharPosition(buf, start) orelse return null;
+    while (true) {
+        if (charAt(buf, pos) == target) return pos;
+        pos = nextCharPosition(buf, pos) orelse return null;
+    }
+}
+
+fn findPrevChar(buf: *Buffer, start: Position, target: u8) ?Position {
+    var pos = prevCharPosition(buf, start) orelse return null;
+    while (true) {
+        if (charAt(buf, pos) == target) return pos;
+        pos = prevCharPosition(buf, pos) orelse return null;
+    }
 }
 
 fn initTestEditor(initial: []const u8) !Editor {
@@ -1512,6 +1915,7 @@ fn initTestEditor(initial: []const u8) !Editor {
         .mode = .insert,
         .cursor = .{},
         .selection = null,
+        .selection_linewise = false,
         .scroll = 0,
         .pending_keys = .empty,
         .pending_trie_name = "",
@@ -1523,6 +1927,7 @@ fn initTestEditor(initial: []const u8) !Editor {
         .pending_numeric_command = null,
         .should_quit = false,
         .yank_text = null,
+        .yank_linewise = false,
         .search_pattern = null,
         .in_char_pending = false,
         .pending_char_command = null,
@@ -1541,6 +1946,7 @@ fn initTestEditor(initial: []const u8) !Editor {
         .last_render_cursor = .{},
         .last_render_mode = .insert,
         .last_render_selection = null,
+        .fileencodings = null,
     };
     const buf = try Buffer.initStrategy(allocator, .gap_buffer, initial);
     errdefer buf.deinit();
@@ -1633,6 +2039,49 @@ test "normal mode yank and paste keep UTF-8 bytes intact" {
     try std.testing.expectEqualSlices(u8, &expected, line);
 }
 
+test "charwise paste_after inserts after the current grapheme" {
+    var editor = try initTestEditor("ab");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .normal;
+    editor.key_trie_root = keymap.normalKeymap();
+    try editor.setYankText("X", false);
+    editor.cursor = .{ .row = 0, .col = 0 };
+
+    try editor.executeCommand(.paste_after);
+
+    try expectEditorBufferText(&editor, "aXb");
+}
+
+test "charwise paste_before inserts before the current grapheme" {
+    var editor = try initTestEditor("ab");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .normal;
+    editor.key_trie_root = keymap.normalKeymap();
+    try editor.setYankText("X", false);
+    editor.cursor = .{ .row = 0, .col = 1 };
+
+    try editor.executeCommand(.paste_before);
+
+    try expectEditorBufferText(&editor, "aXb");
+}
+
+test "charwise paste_before keeps UTF-8 and multiline inserts aligned" {
+    var editor = try initTestEditor("A你B");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .normal;
+    editor.key_trie_root = keymap.normalKeymap();
+    try editor.setYankText("界\nZ", false);
+    editor.cursor = .{ .row = 0, .col = 1 };
+
+    try editor.executeCommand(.paste_before);
+
+    try expectEditorBufferText(&editor, "A界\nZ你B");
+    try std.testing.expectEqual(Position{ .row = 1, .col = 1 }, editor.cursor);
+}
+
 test "delete_selection_noyank deletes without replacing yank register" {
     var editor = try initTestEditor("abc");
     defer deinitTestEditor(&editor);
@@ -1669,6 +2118,202 @@ test "change_selection_noyank enters insert mode without replacing yank register
     try std.testing.expectEqual(Mode.insert, editor.mode);
 }
 
+test "change_selection undo restores both delete and inserted replacement" {
+    var editor = try initTestEditor("abc");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .normal;
+    editor.key_trie_root = keymap.normalKeymap();
+    editor.cursor.col = 1;
+
+    try editor.executeCommand(.change_selection);
+    try editor.handleInsertKey(Key.init(.lower_x));
+    try expectEditorBufferText(&editor, "axc");
+
+    try editor.executeCommand(.undo);
+
+    try expectEditorBufferText(&editor, "abc");
+}
+
+test "change_selection_noyank undo restores both delete and inserted replacement" {
+    var editor = try initTestEditor("abc");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .normal;
+    editor.key_trie_root = keymap.normalKeymap();
+    editor.cursor.col = 1;
+
+    try editor.executeCommand(.change_selection_noyank);
+    try editor.handleInsertKey(Key.init(.lower_x));
+    try expectEditorBufferText(&editor, "axc");
+
+    try editor.executeCommand(.undo);
+
+    try expectEditorBufferText(&editor, "abc");
+}
+
+test "select mode linewise yank and paste keep full lines" {
+    var editor = try initTestEditor("alpha\nbeta\ngamma");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .normal;
+    editor.key_trie_root = keymap.normalKeymap();
+    editor.cursor = .{ .row = 0, .col = 1 };
+
+    try editor.handleKey(Key.init(.lower_x));
+    try editor.handleKey(Key.init(.lower_y));
+
+    try std.testing.expect(editor.yank_linewise);
+    try expectYankText(&editor, "alpha");
+    try std.testing.expectEqual(Mode.normal, editor.mode);
+
+    editor.cursor = .{ .row = 1, .col = 2 };
+    try editor.handleKey(Key.init(.lower_p));
+
+    try expectEditorBufferText(&editor, "alpha\nbeta\nalpha\ngamma");
+    try std.testing.expectEqual(Position{ .row = 2, .col = 0 }, editor.cursor);
+}
+
+test "select mode paste replaces active selection" {
+    var editor = try initTestEditor("alpha beta");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .normal;
+    editor.key_trie_root = keymap.normalKeymap();
+    try editor.setYankText("XYZ", false);
+
+    editor.cursor = .{ .row = 0, .col = 0 };
+    try editor.handleKey(Key.init(.lower_v));
+    try editor.handleKey(Key.init(.lower_l));
+    try editor.handleKey(Key.init(.lower_l));
+    try editor.handleKey(Key.init(.lower_p));
+
+    try expectEditorBufferText(&editor, "XYZha beta");
+    try std.testing.expectEqual(Mode.normal, editor.mode);
+    try std.testing.expect(editor.selection == null);
+}
+
+test "select mode replace fills the active selection" {
+    var editor = try initTestEditor("ab你");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .select_;
+    editor.key_trie_root = keymap.selectKeymap();
+    editor.selection = Selection{
+        .anchor = .{ .row = 0, .col = 0 },
+        .cursor = .{ .row = 0, .col = "ab你".len },
+    };
+    editor.cursor = editor.selection.?.cursor;
+
+    try editor.handleKey(Key.init(.lower_r));
+    try editor.handleKey(Key.init(.lower_x));
+
+    try expectEditorBufferText(&editor, "xxx");
+    try std.testing.expectEqual(Mode.normal, editor.mode);
+}
+
+test "select mode lowercase transforms the whole selection" {
+    var editor = try initTestEditor("AbC");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .select_;
+    editor.key_trie_root = keymap.selectKeymap();
+    editor.selection = Selection{
+        .anchor = .{ .row = 0, .col = 0 },
+        .cursor = .{ .row = 0, .col = 3 },
+    };
+    editor.cursor = editor.selection.?.cursor;
+
+    try editor.handleKey(Key.init(.backtick));
+
+    try expectEditorBufferText(&editor, "abc");
+    try std.testing.expectEqual(Mode.normal, editor.mode);
+    try std.testing.expect(editor.selection == null);
+}
+
+test "Alt-` uppercases a normal-mode selection from the keymap" {
+    var editor = try initTestEditor("abC");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .normal;
+    editor.key_trie_root = keymap.normalKeymap();
+    editor.selection = Selection{
+        .anchor = .{ .row = 0, .col = 0 },
+        .cursor = .{ .row = 0, .col = 3 },
+    };
+    editor.cursor = editor.selection.?.cursor;
+
+    try editor.handleKey(Key.initAlt(.backtick));
+
+    try expectEditorBufferText(&editor, "ABC");
+    try std.testing.expectEqual(Mode.normal, editor.mode);
+    try std.testing.expect(editor.selection == null);
+}
+
+test "v enters select mode and exits back to normal" {
+    var editor = try initTestEditor("alpha\nbeta");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .normal;
+    editor.key_trie_root = keymap.normalKeymap();
+    editor.cursor = .{ .row = 0, .col = 2 };
+
+    try editor.handleKey(Key.init(.lower_v));
+    try std.testing.expectEqual(Mode.select_, editor.mode);
+    try std.testing.expect(editor.selection != null);
+    try std.testing.expectEqual(Position{ .row = 0, .col = 2 }, editor.selection.?.anchor);
+
+    try editor.handleKey(Key.init(.lower_v));
+    try std.testing.expectEqual(Mode.normal, editor.mode);
+    try std.testing.expect(editor.selection == null);
+}
+
+test "x selects current line and extends downward in select mode" {
+    var editor = try initTestEditor("alpha\nbeta\ngamma");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .normal;
+    editor.key_trie_root = keymap.normalKeymap();
+    editor.cursor = .{ .row = 0, .col = 2 };
+
+    try editor.handleKey(Key.init(.lower_x));
+    try std.testing.expectEqual(Mode.select_, editor.mode);
+    try std.testing.expectEqual(Position{ .row = 0, .col = 0 }, editor.selection.?.anchor);
+    try std.testing.expectEqual(Position{ .row = 0, .col = 5 }, editor.selection.?.cursor);
+
+    try editor.handleKey(Key.init(.lower_x));
+    try std.testing.expectEqual(Position{ .row = 0, .col = 0 }, editor.selection.?.anchor);
+    try std.testing.expectEqual(Position{ .row = 1, .col = 4 }, editor.selection.?.cursor);
+}
+
+test "X expands selection to full current line bounds" {
+    var editor = try initTestEditor("alpha\nbeta");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .normal;
+    editor.key_trie_root = keymap.normalKeymap();
+    editor.cursor = .{ .row = 1, .col = 2 };
+
+    try editor.handleKey(Key.init(.upper_x));
+    try std.testing.expectEqual(Mode.select_, editor.mode);
+    try std.testing.expectEqual(Position{ .row = 1, .col = 0 }, editor.selection.?.anchor);
+    try std.testing.expectEqual(Position{ .row = 1, .col = 4 }, editor.selection.?.cursor);
+}
+
+test "% selects the entire buffer linewise" {
+    var editor = try initTestEditor("alpha\nbeta\ngamma");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .normal;
+    editor.key_trie_root = keymap.normalKeymap();
+    editor.cursor = .{ .row = 1, .col = 1 };
+
+    try editor.handleKey(Key.init(.percent));
+    try std.testing.expectEqual(Mode.select_, editor.mode);
+    try std.testing.expectEqual(Position{ .row = 0, .col = 0 }, editor.selection.?.anchor);
+    try std.testing.expectEqual(Position{ .row = 2, .col = 5 }, editor.selection.?.cursor);
+}
+
 test "Alt-d triggers no-yank deletion from keymap" {
     var editor = try initTestEditor("abc");
     defer deinitTestEditor(&editor);
@@ -1703,6 +2348,41 @@ test "Alt-c triggers no-yank change and enters insert mode" {
     try expectEditorBufferText(&editor, "ac");
     try expectYankText(&editor, "a");
     try std.testing.expectEqual(Mode.insert, editor.mode);
+}
+
+test "Alt-. repeats the last find motion from the keymap" {
+    var editor = try initTestEditor("banana");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .normal;
+    editor.key_trie_root = keymap.normalKeymap();
+    editor.cursor = .{ .row = 0, .col = 0 };
+
+    try editor.handleKey(Key.init(.lower_f));
+    try editor.handleKey(Key.init(.lower_a));
+    try std.testing.expectEqual(Position{ .row = 0, .col = 1 }, editor.cursor);
+
+    try editor.handleKey(Key.initAlt(.dot));
+    try std.testing.expectEqual(Position{ .row = 0, .col = 3 }, editor.cursor);
+}
+
+test "select mode search-next binding selects the active match" {
+    var editor = try initTestEditor("alpha beta alpha");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .select_;
+    editor.key_trie_root = keymap.selectKeymap();
+    editor.cursor = .{ .row = 0, .col = 0 };
+    editor.selection = Selection.init(editor.cursor);
+    editor.search_pattern = try editor.allocator.dupe(u8, "alpha");
+    editor.search_direction = .forward;
+
+    try editor.handleKey(Key.init(.lower_n));
+
+    try std.testing.expectEqual(Position{ .row = 0, .col = 15 }, editor.cursor);
+    try std.testing.expect(editor.selection != null);
+    try std.testing.expectEqual(Position{ .row = 0, .col = 11 }, editor.selection.?.anchor);
+    try std.testing.expectEqual(Position{ .row = 0, .col = 15 }, editor.selection.?.cursor);
 }
 
 test "normal mode cursor movement stays on Chinese UTF-8 boundaries" {
@@ -1747,6 +2427,18 @@ test "handleInsertKey keeps Chinese inserts stable between adjacent ASCII bytes"
     try std.testing.expectEqual(Position{ .row = 0, .col = 5 }, editor.cursor);
 }
 
+test "handleInsertKey advances UTF-8 inserts from the aligned cursor position" {
+    var editor = try initTestEditor("A你B");
+    defer deinitTestEditor(&editor);
+
+    editor.cursor = .{ .row = 0, .col = 2 };
+
+    try editor.handleInsertKey(Key.initUtf8("好"));
+
+    try expectEditorBufferText(&editor, "A好你B");
+    try std.testing.expectEqual(Position{ .row = 0, .col = 4 }, editor.cursor);
+}
+
 test "append_mode inserts Chinese text after the full UTF-8 sequence" {
     var editor = try initTestEditor("A你B");
     defer deinitTestEditor(&editor);
@@ -1785,6 +2477,17 @@ test "insertTextBytes keeps UTF-8 bursts intact" {
 
     try expectEditorBufferText(&editor, "A你B");
     try std.testing.expectEqual(Position{ .row = 0, .col = "A你B".len }, editor.cursor);
+}
+
+test "insertTextBytes advances across UTF-8 text and newlines" {
+    var editor = try initTestEditor("A");
+    defer deinitTestEditor(&editor);
+
+    try editor.executeCommand(.insert_at_line_end);
+    try editor.insertTextBytes("你\n好");
+
+    try expectEditorBufferText(&editor, "A你\n好");
+    try std.testing.expectEqual(Position{ .row = 1, .col = "好".len }, editor.cursor);
 }
 
 test "open_below_with_indent inserts a fresh line directly below the cursor" {
@@ -1839,6 +2542,56 @@ test "repeated open_below preserves the original next line content" {
     try expectEditorBufferText(&editor, "alpha\nx\ny\nbeta\ngamma");
 }
 
+test "search_next and search_prev select the full match" {
+    var editor = try initTestEditor("alpha beta\nbeta gamma");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .normal;
+    editor.key_trie_root = keymap.normalKeymap();
+    editor.search_pattern = try editor.allocator.dupe(u8, "beta");
+    editor.search_direction = .forward;
+    editor.cursor = .{ .row = 0, .col = 0 };
+
+    try editor.executeCommand(.search_next);
+    try std.testing.expectEqual(Mode.select_, editor.mode);
+    try std.testing.expectEqual(Position{ .row = 0, .col = 6 }, editor.selection.?.anchor);
+    try std.testing.expectEqual(Position{ .row = 0, .col = 9 }, editor.selection.?.cursor);
+
+    const next_range = editor.selectedTextRange(editor.getBuffer().?);
+    const next_text = try editor.getBuffer().?.copyRange(next_range.start, next_range.end);
+    defer editor.allocator.free(next_text);
+    try std.testing.expectEqualStrings("beta", next_text);
+
+    try editor.executeCommand(.search_prev);
+    try std.testing.expectEqual(Position{ .row = 1, .col = 0 }, editor.selection.?.anchor);
+    try std.testing.expectEqual(Position{ .row = 1, .col = 3 }, editor.selection.?.cursor);
+
+    const prev_range = editor.selectedTextRange(editor.getBuffer().?);
+    const prev_text = try editor.getBuffer().?.copyRange(prev_range.start, prev_range.end);
+    defer editor.allocator.free(prev_text);
+    try std.testing.expectEqualStrings("beta", prev_text);
+}
+
+test "search_next in select mode replaces the active selection with the match" {
+    var editor = try initTestEditor("zero alpha beta");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .select_;
+    editor.key_trie_root = keymap.selectKeymap();
+    editor.selection = Selection{
+        .anchor = .{ .row = 0, .col = 0 },
+        .cursor = .{ .row = 0, .col = 3 },
+    };
+    editor.cursor = editor.selection.?.cursor;
+    editor.search_pattern = try editor.allocator.dupe(u8, "beta");
+    editor.search_direction = .forward;
+
+    try editor.executeCommand(.search_next);
+
+    try std.testing.expectEqual(Position{ .row = 0, .col = 11 }, editor.selection.?.anchor);
+    try std.testing.expectEqual(Position{ .row = 0, .col = 14 }, editor.selection.?.cursor);
+}
+
 test "searchBuffer searches backward across lines" {
     const allocator = std.testing.allocator;
     var buf = try Buffer.initStrategy(allocator, .gap_buffer, "alpha\nbeta alpha\ngamma");
@@ -1846,6 +2599,66 @@ test "searchBuffer searches backward across lines" {
 
     const pos = searchBuffer(buf, "alpha", .{ .row = 2, .col = 0 }, .backward, true) orelse unreachable;
     try std.testing.expectEqual(Position{ .row = 1, .col = 5 }, pos);
+}
+
+test "replace_with_yanked uses the full yanked text for the implicit selection" {
+    var editor = try initTestEditor("hello world");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .normal;
+    editor.key_trie_root = keymap.normalKeymap();
+    editor.cursor = .{ .row = 0, .col = 6 };
+    try editor.setYankText("planet", false);
+
+    try editor.executeCommand(.replace_with_yanked);
+
+    try expectEditorBufferText(&editor, "hello planet");
+}
+
+test "pending replace accepts UTF-8 input" {
+    var editor = try initTestEditor("ab");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .normal;
+    editor.key_trie_root = keymap.normalKeymap();
+
+    try editor.handleKey(Key.init(.lower_r));
+    try editor.handleKey(Key.initUtf8("你"));
+
+    try expectEditorBufferText(&editor, "你b");
+}
+
+test "find and till motions search across lines" {
+    var editor = try initTestEditor("ab\ncd\nef");
+    defer deinitTestEditor(&editor);
+
+    editor.mode = .normal;
+    editor.key_trie_root = keymap.normalKeymap();
+    editor.cursor = .{ .row = 0, .col = 1 };
+
+    try editor.executeCommand(.find_next_char);
+    try editor.handleKey(Key.init(.lower_e));
+    try std.testing.expectEqual(Position{ .row = 2, .col = 0 }, editor.cursor);
+
+    editor.cursor = .{ .row = 0, .col = 1 };
+    try editor.executeCommand(.find_till_char);
+    try editor.handleKey(Key.init(.lower_e));
+    try std.testing.expectEqual(Position{ .row = 1, .col = 1 }, editor.cursor);
+
+    editor.cursor = .{ .row = 2, .col = 0 };
+    try editor.executeCommand(.find_prev_char);
+    try editor.handleKey(Key.init(.lower_b));
+    try std.testing.expectEqual(Position{ .row = 0, .col = 1 }, editor.cursor);
+
+    editor.cursor = .{ .row = 2, .col = 0 };
+    try editor.executeCommand(.till_prev_char);
+    try editor.handleKey(Key.init(.lower_b));
+    try std.testing.expectEqual(Position{ .row = 1, .col = 0 }, editor.cursor);
+
+    editor.cursor = .{ .row = 0, .col = 1 };
+    try editor.executeCommand(.till_prev_char);
+    try editor.handleKey(Key.init(.lower_a));
+    try std.testing.expectEqual(Position{ .row = 0, .col = 1 }, editor.cursor);
 }
 
 test "findBracketMatchAtOrBefore finds nested bracket pair" {

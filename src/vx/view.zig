@@ -6,6 +6,8 @@ const keymap = @import("keymap.zig");
 const term = @import("terminal.zig");
 const syntax = @import("syntax.zig");
 const utf8 = @import("utf8.zig");
+const encoding_mod = @import("../codecs/encoding.zig");
+const line_ending_mod = @import("line_ending.zig");
 
 fn selectionsEqual(sel1: ?Selection, sel2: ?Selection) bool {
     if (sel1 == null and sel2 == null) return true;
@@ -69,8 +71,10 @@ pub fn render(self: *Editor) !void {
         .auto => "auto",
     };
 
-    var left_buf: [256]u8 = undefined;
-    const left = std.fmt.bufPrint(&left_buf, " {s} [{s}] {s}{s}", .{ mode_str, backend, buf_path, dirty_mark }) catch "";
+    var left_buf: [320]u8 = undefined;
+    const enc_name = buf_ptr.file_encoding.displayName();
+    const le_name = buf_ptr.file_line_ending.displayName();
+    const left = std.fmt.bufPrint(&left_buf, " {s} [{s}] {s}{s} [{s}] [{s}]", .{ mode_str, backend, buf_path, dirty_mark, enc_name, le_name }) catch "";
 
     var right_buf: [32]u8 = undefined;
     const right = std.fmt.bufPrint(&right_buf, "{}:{}", .{ self.cursor.row + 1, self.cursor.col + 1 }) catch "";
@@ -782,6 +786,7 @@ fn initTestEditor(initial: []const u8) !Editor {
         .mode = .insert,
         .cursor = .{},
         .selection = null,
+        .selection_linewise = false,
         .scroll = 0,
         .pending_keys = .empty,
         .pending_trie_name = "",
@@ -793,6 +798,7 @@ fn initTestEditor(initial: []const u8) !Editor {
         .pending_numeric_command = null,
         .should_quit = false,
         .yank_text = null,
+        .yank_linewise = false,
         .search_pattern = null,
         .in_char_pending = false,
         .pending_char_command = null,
@@ -811,6 +817,7 @@ fn initTestEditor(initial: []const u8) !Editor {
         .last_render_cursor = .{},
         .last_render_mode = .insert,
         .last_render_selection = null,
+        .fileencodings = null,
     };
     const buf = try Buffer.initStrategy(allocator, .gap_buffer, initial);
     errdefer buf.deinit();
