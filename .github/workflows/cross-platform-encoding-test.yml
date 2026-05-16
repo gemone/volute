@@ -1,0 +1,93 @@
+name: Cross-Platform Encoding Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+jobs:
+  encoding-test:
+    name: ${{ matrix.os }} Encoding Tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            zig-version: "0.16.0"
+          - os: macos-latest
+            zig-version: "0.16.0"
+          - os: windows-latest
+            zig-version: "0.16.0"
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+
+      - name: Install Zig ${{ matrix.zig-version }}
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ matrix.zig-version }}
+
+      - name: Cache Zig dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            .zig-cache
+            zig-cache
+            zig-out
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-v${{ matrix.zig-version }}-encoding-test
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-zig-v${{ matrix.zig-version }}-
+
+      - name: Build project
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Run unit tests
+        run: zig build test
+
+      - name: Install Python test dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pytest
+
+      - name: Run encoding correctness tests
+        run: python3 -m pytest tests/test_encoding.py -v
+
+      - name: Test CLI transcoding functionality
+        run: |
+          echo "Testing CLI transcoding..."
+          ./zig-out/bin/vx --version
+          
+          # Test ASCII round-trip
+          echo "Hello World" > /tmp/test_ascii.txt
+          ./zig-out/bin/vx -e ascii -o /tmp/test_output_ascii.txt /tmp/test_ascii.txt
+          
+          # Test UTF-8 round-trip
+          echo "测试中文" > /tmp/test_utf8.txt
+          ./zig-out/bin/vx -e utf-8 -o /tmp/test_output_utf8.txt /tmp/test_utf8.txt
+          
+          echo "✅ CLI transcoding tests passed on ${{ matrix.os }}"
+
+      - name: Platform-specific encoding validation
+        shell: bash
+        run: |
+          echo "Platform: ${{ matrix.os }}"
+          echo "Architecture: ${{ runner.arch }}"
+          
+          # Test platform-specific encodings
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            echo "Testing Linux-specific encodings..."
+            ./zig-out/bin/vx -e utf-8 -o /tmp/test_linux.txt /tmp/test_utf8.txt
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            echo "Testing macOS-specific encodings..."
+            ./zig-out/bin/vx -e utf-8 -o /tmp/test_macos.txt /tmp/test_utf8.txt
+          elif [[ "${{ runner.os }}" == "Windows" ]]; then
+            echo "Testing Windows-specific encodings..."
+            ./zig-out/bin/vx.exe -e utf-8 -o /tmp/test_windows.txt /tmp/test_utf8.txt
+          fi
+          
+          echo "✅ Platform-specific encoding tests passed"

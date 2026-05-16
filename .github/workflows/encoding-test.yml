@@ -12,11 +12,17 @@ on:
       - 'build.zig'
       - 'build.zig.zon'
       - '.github/workflows/encoding-test.yml'
+  workflow_dispatch:
 
 jobs:
   encoding-test:
-    name: Encode/Decode Correctness
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} Encoding Tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
     steps:
       - name: Checkout sources
         uses: actions/checkout@v6
@@ -25,6 +31,17 @@ jobs:
         uses: goto-bus-stop/setup-zig@v2
         with:
           version: "0.16.0"
+
+      - name: Cache Zig dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            .zig-cache
+            zig-cache
+            zig-out
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-v0.16.0-encoding-test
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-zig-v0.16.0-
 
       - name: Build vx
         run: zig build -Doptimize=ReleaseFast
@@ -37,3 +54,10 @@ jobs:
 
       - name: Run encoding correctness tests
         run: python3 -m pytest tests/test_encoding.py -v
+
+      - name: Test CLI transcoding
+        run: |
+          ./zig-out/bin/vx --version
+          echo "Hello World" > /tmp/test.txt
+          ./zig-out/bin/vx -e utf-8 -o /tmp/out.txt /tmp/test.txt
+          echo "✅ Encoding tests passed on ${{ matrix.os }}"
