@@ -1,0 +1,242 @@
+[
+  {
+    "comment": "East Asian DBCS \u2014 Chinese (Simplified), Japanese, Korean, Traditional Chinese",
+    "name": "gbk",
+    "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/WINDOWS/CP936.TXT",
+    "src": "tools/codecs/CP936.TXT",
+    "max_seq": 2,
+    "common": true
+  },
+  {
+    "name": "big5",
+    "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/WINDOWS/CP950.TXT",
+    "src": "tools/codecs/CP950.TXT",
+    "max_seq": 2,
+    "common": true
+  },
+  {
+    "name": "shiftjis",
+    "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/WINDOWS/CP932.TXT",
+    "src": "tools/codecs/CP932.TXT",
+    "max_seq": 2,
+    "common": true
+  },
+  {
+    "name": "euckr",
+    "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/WINDOWS/CP949.TXT",
+    "src": "tools/codecs/CP949.TXT",
+    "max_seq": 2,
+    "common": true
+  },
+  {
+    "comment": "Windows SBCS \u2014 Latin / Central European / Cyrillic",
+    "name": "cp1250",
+    "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/WINDOWS/CP1250.TXT",
+    "src": "tools/codecs/CP1250.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "cp1251",
+    "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/WINDOWS/CP1251.TXT",
+    "src": "tools/codecs/CP1251.TXT",
+    "max_seq": 1,
+    "common": true
+  },
+  {
+    "name": "cp1252",
+    "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/WINDOWS/CP1252.TXT",
+    "src": "tools/codecs/CP1252.TXT",
+    "max_seq": 1,
+    "common": true
+  },
+  {
+    "comment": "Unix SBCS",
+    "name": "koi8r",
+    "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MISC/KOI8-R.TXT",
+    "src": "tools/codecs/KOI8-R.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "comment": "Japanese EUC (JIS X 0208 + JIS X 0201 half-kana). Source is pre-generated from JIS0208.TXT+JIS0201.TXT \u2014 no_fetch=true to always use local src.",
+    "name": "eucjp",
+    "url": "https://www.unicode.org/Public/MAPPINGS/OBSOLETE/EASTASIA/JIS/JIS0208.TXT",
+    "src": "tools/codecs/EUC-JP.TXT",
+    "max_seq": 2,
+    "common": true,
+    "no_fetch": true
+  },
+  {
+    "comment": "Windows SBCS \u2014 Thai / Greek / Turkish / Hebrew / Arabic / Baltic / Vietnamese",
+    "name": "cp874",
+    "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/WINDOWS/CP874.TXT",
+    "src": "tools/codecs/CP874.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "cp1253",
+    "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/WINDOWS/CP1253.TXT",
+    "src": "tools/codecs/CP1253.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "cp1254",
+    "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/WINDOWS/CP1254.TXT",
+    "src": "tools/codecs/CP1254.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "cp1255",
+    "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/WINDOWS/CP1255.TXT",
+    "src": "tools/codecs/CP1255.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "cp1256",
+    "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/WINDOWS/CP1256.TXT",
+    "src": "tools/codecs/CP1256.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "cp1257",
+    "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/WINDOWS/CP1257.TXT",
+    "src": "tools/codecs/CP1257.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "cp1258",
+    "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/WINDOWS/CP1258.TXT",
+    "src": "tools/codecs/CP1258.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "comment": "KOI8-U — Ukrainian Cyrillic (RFC2319).",
+    "name": "koi8u",
+    "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MISC/KOI8-U.TXT",
+    "src": "tools/codecs/KOI8-U.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "comment": "DOS code pages — CP437 (US ASCII extended), CP850 (Multilingual Latin-1)",
+    "name": "cp437",
+    "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/PC/CP437.TXT",
+    "src": "tools/codecs/CP437.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "cp850",
+    "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/PC/CP850.TXT",
+    "src": "tools/codecs/CP850.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "comment": "ISO-8859 series — European SBCS encodings from unicode.org",
+    "name": "iso8859_2",
+    "url": "https://www.unicode.org/Public/MAPPINGS/ISO8859/8859-2.TXT",
+    "src": "tools/codecs/ISO-8859-2.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "iso8859_3",
+    "url": "https://www.unicode.org/Public/MAPPINGS/ISO8859/8859-3.TXT",
+    "src": "tools/codecs/ISO-8859-3.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "iso8859_4",
+    "url": "https://www.unicode.org/Public/MAPPINGS/ISO8859/8859-4.TXT",
+    "src": "tools/codecs/ISO-8859-4.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "iso8859_5",
+    "url": "https://www.unicode.org/Public/MAPPINGS/ISO8859/8859-5.TXT",
+    "src": "tools/codecs/ISO-8859-5.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "iso8859_6",
+    "url": "https://www.unicode.org/Public/MAPPINGS/ISO8859/8859-6.TXT",
+    "src": "tools/codecs/ISO-8859-6.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "iso8859_7",
+    "url": "https://www.unicode.org/Public/MAPPINGS/ISO8859/8859-7.TXT",
+    "src": "tools/codecs/ISO-8859-7.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "iso8859_8",
+    "url": "https://www.unicode.org/Public/MAPPINGS/ISO8859/8859-8.TXT",
+    "src": "tools/codecs/ISO-8859-8.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "iso8859_9",
+    "url": "https://www.unicode.org/Public/MAPPINGS/ISO8859/8859-9.TXT",
+    "src": "tools/codecs/ISO-8859-9.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "iso8859_10",
+    "url": "https://www.unicode.org/Public/MAPPINGS/ISO8859/8859-10.TXT",
+    "src": "tools/codecs/ISO-8859-10.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "iso8859_11",
+    "url": "https://www.unicode.org/Public/MAPPINGS/ISO8859/8859-11.TXT",
+    "src": "tools/codecs/ISO-8859-11.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "iso8859_13",
+    "url": "https://www.unicode.org/Public/MAPPINGS/ISO8859/8859-13.TXT",
+    "src": "tools/codecs/ISO-8859-13.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "iso8859_14",
+    "url": "https://www.unicode.org/Public/MAPPINGS/ISO8859/8859-14.TXT",
+    "src": "tools/codecs/ISO-8859-14.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "iso8859_15",
+    "url": "https://www.unicode.org/Public/MAPPINGS/ISO8859/8859-15.TXT",
+    "src": "tools/codecs/ISO-8859-15.TXT",
+    "max_seq": 1,
+    "common": false
+  },
+  {
+    "name": "iso8859_16",
+    "url": "https://www.unicode.org/Public/MAPPINGS/ISO8859/8859-16.TXT",
+    "src": "tools/codecs/ISO-8859-16.TXT",
+    "max_seq": 1,
+    "common": false
+  }
+]
