@@ -18,3 +18,20 @@ tmux_*.txt
 # OS files
 .DS_Store
 Thumbs.db
+
+# Unicode.org codec mapping tables
+# Only "common" codec TXT files are committed (needed for offline builds).
+# Non-common TXT files are auto-downloaded at build time by convert.zig.
+# Files with no_fetch=true that are not common must be manually placed.
+tools/codecs/*.TXT
+# Common codecs — committed so offline builds always work
+!tools/codecs/CP936.TXT
+!tools/codecs/CP950.TXT
+!tools/codecs/CP932.TXT
+!tools/codecs/CP949.TXT
+!tools/codecs/CP1251.TXT
+!tools/codecs/CP1252.TXT
+# EUC-JP: no_fetch=true, pre-generated from JIS sources
+!tools/codecs/EUC-JP.TXT
+!tools/codecs/JIS0201.TXT
+!tools/codecs/JIS0208.TXT
