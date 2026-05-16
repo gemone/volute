@@ -6,6 +6,9 @@ const TextStore = @import("text/storage.zig").TextStore;
 const createTextStore = @import("text/factory.zig").create;
 const Strategy = @import("text/factory.zig").Strategy;
 const utf8 = @import("utf8.zig");
+const encoding = @import("../codecs/encoding.zig");
+const validation = @import("../codecs/validation.zig");
+const line_ending = @import("line_ending.zig");
 
 pub const Buffer = struct {
     const Self = @This();
@@ -23,6 +26,12 @@ pub const Buffer = struct {
     backend_strategy: Strategy,
     path: ?[]const u8,
     dirty: bool,
+    /// Encoding used in the on-disk file (default: utf8).
+    file_encoding: encoding.Encoding,
+    /// Line-ending style used in the on-disk file (default: lf).
+    file_line_ending: line_ending.LineEnding,
+    /// Whether the file had a UTF-8 BOM; preserved on save.
+    has_bom: bool,
 
     history_root: *HistoryNode,
     history_current: *HistoryNode,
@@ -141,6 +150,9 @@ pub const Buffer = struct {
             .backend_strategy = resolved_strategy,
             .path = null,
             .dirty = false,
+            .file_encoding = .utf8,
+            .file_line_ending = .lf,
+            .has_bom = false,
             .history_root = undefined,
             .history_current = undefined,
             .pending_history = null,
@@ -453,6 +465,20 @@ pub const Buffer = struct {
     }
 
     pub fn openFile(allocator: std.mem.Allocator, io: Io, path: []const u8) !*Self {
+        return openFileWithOptions(allocator, io, path, null);
+    }
+
+    /// Open a file with an optional custom encoding probe list.
+    ///
+    /// When `fileencodings` is null, `encoding.detect()` is used (default list).
+    /// When non-null, `encoding.detectWithList()` probes encodings in that order.
+    /// This is the path taken when the user has configured `:set fencs=<list>`.
+    pub fn openFileWithOptions(
+        allocator: std.mem.Allocator,
+        io: Io,
+        path: []const u8,
+        fileencodings: ?[]const encoding.Encoding,
+    ) !*Self {
         const cwd = Dir.cwd();
         var file = cwd.openFile(io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => {
@@ -469,14 +495,50 @@ pub const Buffer = struct {
         const strategy = resolveStrategy(.auto, @intCast(stat.size));
         var read_buf: [4096]u8 = undefined;
         var reader = file.reader(io, &read_buf);
-        const data = try reader.interface.readAlloc(allocator, @intCast(stat.size));
-        defer allocator.free(data);
+        const raw = try reader.interface.readAlloc(allocator, @intCast(stat.size));
+        defer allocator.free(raw);
+
+        // Detect encoding and line-ending from the raw on-disk bytes.
+        const file_enc = if (fileencodings) |fencs|
+            encoding.detectWithList(raw, fencs)
+        else
+            encoding.detect(raw);
+        const file_le = line_ending.detect(raw);
+        const had_bom = (file_enc == .utf8bom);
+
+        // Transcode to UTF-8 (strips BOM if present).
+        // Fast path: raw is already valid UTF-8/ASCII, reuse it in place.
+        const utf8_data = if (file_enc == .utf8 or file_enc == .ascii)
+            raw[0..]
+        else
+            try encoding.toUtf8(allocator, raw, file_enc);
+        defer if (utf8_data.ptr != raw.ptr) allocator.free(utf8_data);
+
+        // Validate that UTF-8 content can be safely represented in target encoding
+        // This prevents silent data loss when characters cannot be encoded
+        const validation_result = try validation.validateUtf8ToEncoding(utf8_data, file_enc);
+        if (validation_result.is_lossy) {
+            const error_msg = try validation.formatValidationError(validation_result, path, file_enc);
+            defer allocator.free(error_msg);
+
+            // Print error message to stderr and return error
+            std.debug.print("{s}", .{error_msg});
+            return error.EncodingLossDetected;
+        }
+
+        // Normalize all line endings to LF for internal storage.
+        const normalized = try line_ending.normalize(allocator, utf8_data);
+        defer if (normalized) |n| allocator.free(n);
+        const data = normalized orelse utf8_data;
 
         const self = try Self.initStrategy(allocator, strategy, data);
         errdefer self.deinit();
 
         self.path = try allocator.dupe(u8, path);
         self.dirty = false;
+        self.file_encoding = file_enc;
+        self.file_line_ending = file_le;
+        self.has_bom = had_bom;
         return self;
     }
 
@@ -494,14 +556,109 @@ pub const Buffer = struct {
         });
         defer atomic.deinit(io);
 
+        // Collect internal UTF-8 text.
+        var utf8_buf = std.ArrayList(u8).empty;
+        defer utf8_buf.deinit(self.allocator);
+        try self.text.writeToBuf(self.allocator, &utf8_buf);
+
         var write_buf: [4096]u8 = undefined;
         var writer = atomic.file.writerStreaming(io, &write_buf);
-        try self.text.writeTo(&writer.interface);
+
+        // Fast path: UTF-8 / ASCII with LF line endings — write the buffer
+        // directly.  This avoids two full-file copies (denormalize + fromUtf8).
+        const is_plain_utf8 = switch (self.file_encoding) {
+            .utf8, .ascii => true,
+            else => false,
+        };
+        if (self.file_line_ending == .lf and is_plain_utf8 and !self.has_bom) {
+            try writer.interface.writeAll(utf8_buf.items);
+            try writer.interface.flush();
+            try atomic.file.sync(io);
+            try atomic.replace(io);
+            self.dirty = false;
+            return;
+        }
+
+        // Re-apply line endings for the target file format.
+        const with_le = try line_ending.denormalize(self.allocator, utf8_buf.items, self.file_line_ending);
+        defer self.allocator.free(with_le);
+
+        // Encode from UTF-8 to the target file encoding.
+        // has_bom controls whether a UTF-8 BOM is written, regardless of how
+        // the file was originally detected (.utf8 vs .utf8bom).  This lets
+        // :set bomb / :set nobomb add or strip the BOM on the next save.
+        const out_enc: encoding.Encoding = switch (self.file_encoding) {
+            .utf8, .utf8bom, .ascii => if (self.has_bom) .utf8bom else .utf8,
+            else => self.file_encoding,
+        };
+        const out_bytes = try encoding.fromUtf8(self.allocator, with_le, out_enc);
+        defer self.allocator.free(out_bytes);
+
+        try writer.interface.writeAll(out_bytes);
         try writer.interface.flush();
         try atomic.file.sync(io);
         try atomic.replace(io);
 
         self.dirty = false;
+    }
+
+    /// Re-read the file from disk using `enc` instead of auto-detecting.
+    ///
+    /// Equivalent to Emacs `revert-buffer-with-coding-system` or Vim `:e ++enc=`.
+    /// Replaces the buffer content, resets undo history, and marks all lines dirty.
+    /// Returns `error.NoPath` when the buffer has no associated file.
+    pub fn revertWithEncoding(self: *Self, io: Io, enc: encoding.Encoding) !void {
+        const path = self.path orelse return error.NoPath;
+        const cwd = Dir.cwd();
+        var file = try cwd.openFile(io, path, .{});
+        defer file.close(io);
+
+        const stat = try file.stat(io);
+        const strategy = resolveStrategy(.auto, @intCast(stat.size));
+        var read_buf: [4096]u8 = undefined;
+        var reader = file.reader(io, &read_buf);
+        const raw = try reader.interface.readAlloc(self.allocator, @intCast(stat.size));
+        defer self.allocator.free(raw);
+
+        const file_le = line_ending.detect(raw);
+
+        // Decode using the caller-specified encoding
+        const utf8_data = switch (enc) {
+            .utf8, .ascii => raw[0..],
+            .utf8bom => blk: {
+                const bom = [3]u8{ 0xEF, 0xBB, 0xBF };
+                break :blk if (raw.len >= 3 and std.mem.startsWith(u8, raw, &bom)) raw[3..] else raw[0..];
+            },
+            else => try encoding.toUtf8(self.allocator, raw, enc),
+        };
+        defer if (utf8_data.ptr != raw.ptr) self.allocator.free(utf8_data);
+
+        const normalized = try line_ending.normalize(self.allocator, utf8_data);
+        defer if (normalized) |n| self.allocator.free(n);
+        const data = normalized orelse utf8_data;
+
+        // Replace text store and history
+        self.text.deinit(self.allocator);
+        self.text = try createTextStore(self.allocator, strategy, data);
+        self.backend_strategy = strategy;
+        self.clearHistory();
+        self.history_root = try self.createHistoryRoot(strategy);
+        self.history_current = self.history_root;
+        self.pending_history = null;
+
+        // Update metadata
+        self.file_encoding = enc;
+        self.file_line_ending = file_le;
+        self.has_bom = (enc == .utf8bom);
+        self.dirty = false;
+        self.last_edit_offset = null;
+        self.localized_edit_streak = 0;
+        self.dispersed_edit_streak = 0;
+
+        // Resize and invalidate render cache
+        const new_line_count = self.text.lineCount();
+        try self.render_cache.resize(self.allocator, new_line_count);
+        self.render_cache.invalidateAll();
     }
 
     pub fn lineCount(self: *Self) usize {
@@ -649,6 +806,25 @@ pub const Buffer = struct {
 
         const offset = (try self.text.posToOffset(row, start)) orelse return;
         try self.replaceRange(offset, end - start, bytes);
+    }
+
+    pub fn copyRange(self: *Self, start: Position, end: Position) ![]u8 {
+        const start_pos = self.clampPosInsert(start);
+        const end_pos = self.clampPosInsert(end);
+        const start_off = (try self.text.posToOffset(start_pos.row, start_pos.col)) orelse return self.allocator.alloc(u8, 0);
+        const end_off = (try self.text.posToOffset(end_pos.row, end_pos.col)) orelse return self.allocator.alloc(u8, 0);
+        if (end_off <= start_off) return self.allocator.alloc(u8, 0);
+        return try self.copyTextRange(start_off, end_off - start_off);
+    }
+
+    pub fn replaceTextRange(self: *Self, start: Position, end: Position, bytes: []const u8) !void {
+        const start_pos = self.clampPosInsert(start);
+        const end_pos = self.clampPosInsert(end);
+        const start_off = (try self.text.posToOffset(start_pos.row, start_pos.col)) orelse return;
+        const end_off = (try self.text.posToOffset(end_pos.row, end_pos.col)) orelse return;
+        if (end_off < start_off) return;
+        try self.replaceRange(start_off, end_off - start_off, bytes);
+        self.render_cache.markDirtyFrom(start_pos.row);
     }
 
     pub fn replaceLinePrefix(self: *Self, row: usize, prefix: []const u8, rest_start: usize) !void {
