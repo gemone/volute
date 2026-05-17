@@ -5,6 +5,8 @@ const Selection = @import("selection.zig").Selection;
 const keymap = @import("keymap.zig");
 const term = @import("terminal.zig");
 const syntax = @import("syntax.zig");
+const treesitter = @import("treesitter.zig");
+const grammar_detect = @import("grammar.zig");
 const utf8 = @import("utf8.zig");
 const encoding_mod = @import("../codecs/encoding.zig");
 const line_ending_mod = @import("line_ending.zig");
@@ -23,7 +25,37 @@ pub fn render(self: *Editor) !void {
     defer style_buf.deinit(gpa);
 
     const buf_ptr = self.getBuffer() orelse return;
-    const language = syntax.detectLanguage(buf_ptr.path);
+
+    // Detect grammar and (re)load handle when file or grammar changes.
+    const file_path = buf_ptr.path orelse "";
+    const first_line = buf_ptr.getLine(0);
+    const detected_name = grammar_detect.grammarNameForFile(file_path, first_line);
+    if (!std.mem.eql(u8, detected_name orelse "", self.grammar_name orelse "")) {
+        // Grammar changed — release old handle.
+        if (self.grammar_handle) |*gh| {
+            gh.deinit();
+            self.grammar_handle = null;
+        }
+        self.grammar_name = detected_name;
+        if (detected_name) |name| {
+            if (self.grammar_paths) |paths| {
+                self.grammar_handle = grammar_detect.loadGrammar(self.io, self.allocator, paths, name) catch |err| blk: {
+                    std.log.warn("loadGrammar({s}): {}", .{ name, err });
+                    break :blk null;
+                };
+            }
+        }
+    }
+
+    // Compute full-source tree-sitter highlights (byte-parallel style array).
+    var src_buf: std.ArrayList(u8) = .empty;
+    defer src_buf.deinit(gpa);
+    var hl_styles: ?[]syntax.TokenStyle = null;
+    defer if (hl_styles) |s| gpa.free(s);
+    if (self.grammar_handle) |*handle| {
+        buf_ptr.text.writeToBuf(gpa, &src_buf) catch {};
+        hl_styles = treesitter.highlight(gpa, handle, src_buf.items) catch null;
+    }
     const rows = self.terminal.size.rows;
     const cols = self.terminal.size.cols;
     const line_num_width = lineWidth(buf_ptr.lineCount());
@@ -55,7 +87,7 @@ pub fn render(self: *Editor) !void {
     const visible_rows = rows - 2;
     var row: usize = 0;
     while (row < visible_rows) : (row += 1) {
-        try appendRenderedTextRow(self, gpa, &buf, &style_buf, row, line_num_width, cols, language, full_redraw);
+        try appendRenderedTextRow(self, gpa, &buf, &style_buf, row, line_num_width, cols, hl_styles, full_redraw);
     }
 
     const status_row = rows - 2;
@@ -166,7 +198,7 @@ fn appendRenderedTextRow(
     screen_row: usize,
     line_num_width: usize,
     cols: usize,
-    language: syntax.Language,
+    hl_styles: ?[]const syntax.TokenStyle,
     force_draw: bool,
 ) !void {
     const buf_ptr = self.getBuffer() orelse return;
@@ -198,7 +230,23 @@ fn appendRenderedTextRow(
         const line = buf_ptr.getLine(line_idx) orelse "";
         const max_cells = cols -| text_start;
         const visible = line[0..visibleByteCountForCells(line, max_cells)];
-        try syntax.highlightLine(gpa, language, visible, style_buf);
+        // Resolve per-line highlight styles from the full-source byte-parallel array.
+        style_buf.clearRetainingCapacity();
+        if (hl_styles) |hs| {
+            const range = buf_ptr.text.lineByteRange(line_idx) catch null;
+            if (range) |r| {
+                const start = r.start;
+                const end = @min(start + visible.len, hs.len);
+                const line_hl = if (start < hs.len) hs[start..end] else &[_]syntax.TokenStyle{};
+                try style_buf.appendSlice(gpa, line_hl);
+            }
+        }
+        // Pad with .normal for any bytes not covered by highlights.
+        const current_len = style_buf.items.len;
+        if (current_len < visible.len) {
+            try style_buf.resize(gpa, visible.len);
+            @memset(style_buf.items[current_len..], .normal);
+        }
         if (visible.len == 0 and line_idx == self.cursor.row and self.mode == .normal) {
             try term.setReverse(gpa, buf, true);
             try buf.appendSlice(gpa, "█");
@@ -818,6 +866,9 @@ fn initTestEditor(initial: []const u8) !Editor {
         .last_render_mode = .insert,
         .last_render_selection = null,
         .fileencodings = null,
+        .grammar_paths = null,
+        .grammar_handle = null,
+        .grammar_name = null,
     };
     const buf = try Buffer.initStrategy(allocator, .gap_buffer, initial);
     errdefer buf.deinit();
@@ -844,7 +895,7 @@ test "appendRenderedTextRow keeps Chinese UTF-8 bytes in output" {
     var styles: std.ArrayList(syntax.TokenStyle) = .empty;
     defer styles.deinit(std.testing.allocator);
 
-    try appendRenderedTextRow(&editor, std.testing.allocator, &out, &styles, 0, lineWidth(1), 80, .plain, true);
+    try appendRenderedTextRow(&editor, std.testing.allocator, &out, &styles, 0, lineWidth(1), 80, null, true);
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "A你B") != null);
 }
@@ -867,7 +918,7 @@ test "appendRenderedTextRow keeps cursor styling outside Chinese UTF-8 bytes" {
     var styles: std.ArrayList(syntax.TokenStyle) = .empty;
     defer styles.deinit(std.testing.allocator);
 
-    try appendRenderedTextRow(&editor, std.testing.allocator, &out, &styles, 0, lineWidth(1), 80, .plain, true);
+    try appendRenderedTextRow(&editor, std.testing.allocator, &out, &styles, 0, lineWidth(1), 80, null, true);
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "你") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\xe4\x1b") == null);
@@ -885,7 +936,7 @@ test "appendRenderedTextRow shows a cursor marker on an empty normal-mode line" 
     var styles: std.ArrayList(syntax.TokenStyle) = .empty;
     defer styles.deinit(std.testing.allocator);
 
-    try appendRenderedTextRow(&editor, std.testing.allocator, &out, &styles, 0, lineWidth(1), 80, .plain, true);
+    try appendRenderedTextRow(&editor, std.testing.allocator, &out, &styles, 0, lineWidth(1), 80, null, true);
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[7m█\x1b[27m") != null);
 }
@@ -900,11 +951,11 @@ test "appendRenderedTextRow marks lines clean after rendering" {
     defer styles.deinit(std.testing.allocator);
 
     const buf_ptr = editor.getBuffer().?;
-    try appendRenderedTextRow(&editor, std.testing.allocator, &out, &styles, 0, lineWidth(1), 80, .plain, true);
+    try appendRenderedTextRow(&editor, std.testing.allocator, &out, &styles, 0, lineWidth(1), 80, null, true);
     try std.testing.expect(!buf_ptr.render_cache.isDirty(0));
 
     out.clearRetainingCapacity();
-    try appendRenderedTextRow(&editor, std.testing.allocator, &out, &styles, 0, lineWidth(1), 80, .plain, false);
+    try appendRenderedTextRow(&editor, std.testing.allocator, &out, &styles, 0, lineWidth(1), 80, null, false);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
 }
 

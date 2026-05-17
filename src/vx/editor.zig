@@ -10,6 +10,7 @@ const keymap = @import("keymap.zig");
 const Command = keymap.Command;
 const encoding_mod = @import("../codecs/encoding.zig");
 const line_ending_mod = @import("line_ending.zig");
+const grammar_mod = @import("grammar.zig");
 const SearchDirection = enum { forward, backward };
 const SearchMatch = struct {
     start: Position,
@@ -72,6 +73,13 @@ pub const Editor = struct {
     /// Mirrors Vim's `fileencodings` option.  null = use encoding.default_fileencodings.
     /// Owned by the editor (heap-allocated); replaced by `:set fencs=<list>`.
     fileencodings: ?[]const encoding_mod.Encoding,
+    /// Tree-sitter grammar paths (lib_dir + query_dir). Strings are owned by the editor.
+    grammar_paths: ?grammar_mod.GrammarPaths,
+    /// Currently loaded grammar handle. Null if no grammar was loaded or loading failed.
+    grammar_handle: ?grammar_mod.GrammarHandle,
+    /// Name of the grammar currently loaded (e.g. "python"). Points into static config;
+    /// not owned by the editor.
+    grammar_name: ?[]const u8,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !Self {
         var terminal = try Terminal.init(io);
@@ -118,6 +126,9 @@ pub const Editor = struct {
             .last_render_mode = .normal,
             .last_render_selection = null,
             .fileencodings = null,
+            .grammar_paths = null,
+            .grammar_handle = null,
+            .grammar_name = null,
         };
     }
 
@@ -130,6 +141,11 @@ pub const Editor = struct {
         if (self.search_pattern) |p| self.allocator.free(p);
         if (self.status_msg) |m| self.allocator.free(m);
         if (self.fileencodings) |fe| self.allocator.free(fe);
+        if (self.grammar_handle) |*gh| gh.deinit();
+        if (self.grammar_paths) |gp| {
+            self.allocator.free(gp.lib_dir);
+            self.allocator.free(gp.query_dir);
+        }
         self.terminal.deinit();
     }
 
@@ -1947,6 +1963,9 @@ fn initTestEditor(initial: []const u8) !Editor {
         .last_render_mode = .insert,
         .last_render_selection = null,
         .fileencodings = null,
+        .grammar_paths = null,
+        .grammar_handle = null,
+        .grammar_name = null,
     };
     const buf = try Buffer.initStrategy(allocator, .gap_buffer, initial);
     errdefer buf.deinit();
