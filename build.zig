@@ -33,6 +33,7 @@ pub fn build(b: *std.Build) void {
         "Codec preset: 'all' (default), 'common', or comma-separated names e.g. 'gbk,cp1252'",
     ) orelse "all";
 
+    // ── Codec conversion tool ─────────────────────────────────────────────────────
     const convert_exe = b.addExecutable(.{
         .name = "convert",
         .root_module = b.createModule(.{
@@ -51,92 +52,166 @@ pub fn build(b: *std.Build) void {
     const gen_codecs_step = b.step("gen-codecs", "Regenerate encoding tables from Unicode source files");
     gen_codecs_step.dependOn(&convert_run.step);
 
-    // Stub codec .zig for codecs excluded by -Dcodecs.
-    const stub_wf = b.addWriteFiles();
-    const sbcs_stub_content =
-        \\// Stub codec — excluded from this build preset (-Dcodecs=...)
-        \\// Non-ASCII bytes decode to U+FFFD; encoding emits '?'.
-        \\const std = @import("std");
-        \\pub const fwd: []const u8 = &.{};
-        \\pub const rev: []const u8 = &.{};
-        \\pub const fwd_table: [128]u32 = [_]u32{0} ** 128;
-        \\pub const rev_base: u16 = 0x0080;
-        \\pub const rev_table: [1]u8 = .{0xFF};
-        \\pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
-        \\    var out = try allocator.alloc(u8, bytes.len * 3);
-        \\    errdefer allocator.free(out);
-        \\    var j: usize = 0;
-        \\    for (bytes) |b| {
-        \\        if (b < 0x80) { out[j] = b; j += 1; }
-        \\        else { out[j] = 0xEF; out[j+1] = 0xBF; out[j+2] = 0xBD; j += 3; }
-        \\    }
-        \\    return allocator.realloc(out, j);
-        \\}
-        \\pub fn encode(allocator: std.mem.Allocator, utf8_bytes: []const u8) ![]u8 {
-        \\    var out = try allocator.alloc(u8, utf8_bytes.len);
-        \\    errdefer allocator.free(out);
-        \\    var j: usize = 0;
-        \\    var i: usize = 0;
-        \\    while (i < utf8_bytes.len) {
-        \\        const b = utf8_bytes[i];
-        \\        if (b < 0x80) { out[j] = b; j += 1; i += 1; }
-        \\        else {
-        \\            out[j] = '?'; j += 1;
-        \\            const seq_len: usize = if (b < 0xE0) 2 else if (b < 0xF0) 3 else 4;
-        \\            i += if (i + seq_len <= utf8_bytes.len) seq_len else 1;
-        \\        }
-        \\    }
-        \\    return allocator.realloc(out, j);
-        \\}
-        \\
-    ;
-    const dbcs_stub_content =
-        \\// Stub codec — excluded from this build preset (-Dcodecs=...)
-        \\// Non-ASCII bytes decode to U+FFFD; encoding emits '?'.
-        \\const std = @import("std");
-        \\pub const is_stub = true;
-        \\pub const fwd_table: [65536]u16 = [_]u16{0xFFFF} ** 65536;
-        \\pub const rev_table: [65536]u16 = [_]u16{0xFFFF} ** 65536;
-        \\pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
-        \\    var out = try allocator.alloc(u8, bytes.len * 3);
-        \\    errdefer allocator.free(out);
-        \\    var j: usize = 0;
-        \\    for (bytes) |b| {
-        \\        if (b < 0x80) { out[j] = b; j += 1; }
-        \\        else { out[j] = 0xEF; out[j+1] = 0xBF; out[j+2] = 0xBD; j += 3; }
-        \\    }
-        \\    return allocator.realloc(out, j);
-        \\}
-        \\pub fn encode(allocator: std.mem.Allocator, utf8_bytes: []const u8) ![]u8 {
-        \\    var out = try allocator.alloc(u8, utf8_bytes.len);
-        \\    errdefer allocator.free(out);
-        \\    var j: usize = 0;
-        \\    var i: usize = 0;
-        \\    while (i < utf8_bytes.len) {
-        \\        const b = utf8_bytes[i];
-        \\        if (b < 0x80) { out[j] = b; j += 1; i += 1; }
-        \\        else {
-        \\            out[j] = '?'; j += 1;
-        \\            const seq_len: usize = if (b < 0xE0) 2 else if (b < 0xF0) 3 else 4;
-        \\            i += if (i + seq_len <= utf8_bytes.len) seq_len else 1;
-        \\        }
-        \\    }
-        \\    return allocator.realloc(out, j);
-        \\}
-        \\
-    ;
+    // ── Tree-sitter grammar configuration ───────────────────────────────────────────
 
-    // Selected codecs produce a tracked file from convert; excluded get stubs
-    // (each needs a unique file — Zig disallows two modules sharing a source).
+    // tree-sitter dependency for the main executable
+    const ts_dep = b.dependency("tree_sitter", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const ts_module = ts_dep.module("tree_sitter");
+
+    // Separate tree-sitter dependency for the grammar CLI tool (host, ReleaseFast)
+    const ts_dep_host = b.dependency("tree_sitter", .{
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    });
+    const ts_module_host = ts_dep_host.module("tree_sitter");
+
+    // ── Languages config module (injected into vx and tool executables) ──────────
+    const languages_mod = b.createModule(.{
+        .root_source_file = b.path("src/languages/config.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    });
+    // Inject languages.zon so @import("default_config_languages") inside config.zig resolves.
+    languages_mod.addAnonymousImport("default_config_languages", .{ .root_source_file = b.path("languages.zon") });
+
+    // ── Grammar management CLI step ───────────────────────────────────────────────
+    const tree_sitters_exe = b.addExecutable(.{
+        .name = "tree-sitters",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/languages/grammar.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+        }),
+    });
+    tree_sitters_exe.root_module.addImport("tree-sitter", ts_module_host);
+    tree_sitters_exe.root_module.addImport("languages", languages_mod);
+
+    const tree_sitters_run = b.addRunArtifact(tree_sitters_exe);
+    tree_sitters_run.setCwd(b.path("."));
+    if (b.args) |args| tree_sitters_run.addArgs(args);
+
+    const grammar_step = b.step("grammar", "Manage tree-sitter grammars (fetch/update/build/rm/list/test)");
+    grammar_step.dependOn(&tree_sitters_run.step);
+
+    // ── Auto fetch+build all grammars step ────────────────────────────────────────
+    const grammars_fetch_run = b.addRunArtifact(tree_sitters_exe);
+    grammars_fetch_run.setCwd(b.path("."));
+    grammars_fetch_run.addArg("fetch");
+
+    const grammars_build_run = b.addRunArtifact(tree_sitters_exe);
+    grammars_build_run.setCwd(b.path("."));
+    grammars_build_run.addArg("build");
+    grammars_build_run.step.dependOn(&grammars_fetch_run.step);
+
+    const grammars_step = b.step("grammars", "Fetch and build all tree-sitter grammar .so files");
+    grammars_step.dependOn(&grammars_build_run.step);
+
+    // ── Language management CLI step ───────────────────────────────────────────────
+    const languages_exe = b.addExecutable(.{
+        .name = "languages",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/languages/language.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+        }),
+    });
+    languages_exe.root_module.addImport("languages", languages_mod);
+
+    const languages_run = b.addRunArtifact(languages_exe);
+    languages_run.setCwd(b.path("."));
+    if (b.args) |args| languages_run.addArgs(args);
+
+    const language_step = b.step("language", "Manage language detection mappings (add/remove/list/update)");
+    language_step.dependOn(&languages_run.step);
+
+    // ── Codec .zig file generation ─────────────────────────────────────────────────
 
     const codec_zigs = b.allocator.alloc(std.Build.LazyPath, codecs.len) catch @panic("OOM");
 
     for (codecs, codec_zigs) |codec, *codec_zig| {
         if (!cvt.codecSelected(codec, codecs_opt)) {
-            const stub = if (codec.max_seq == 2) dbcs_stub_content else sbcs_stub_content;
+            // Stub generation for excluded codecs
+            const stub_content = if (codec.max_seq == 2)
+                \\// Stub codec — excluded from this build preset (-Dcodecs=...)
+                \\// Non-ASCII bytes decode to U+FFFD; encoding emits '?'.
+                \\const std = @import("std");
+                \\pub const is_stub = true;
+                \\pub const fwd_table: [65536]u16 = [_]u16{0xFFFF} ** 65536;
+                \\pub const rev_table: [65536]u16 = [_]u16{0xFFFF} ** 65536;
+                \\pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+                \\    var out = try allocator.alloc(u8, bytes.len * 3);
+                \\    errdefer allocator.free(out);
+                \\    var j: usize = 0;
+                \\    for (bytes) |b| {
+                \\        if (b < 0x80) { out[j] = b; j += 1; }
+                \\        else { out[j] = 0xEF; out[j+1] = 0xBF; out[j+2] = 0xBD; j += 3; }
+                \\    }
+                \\    return allocator.realloc(out, j);
+                \\}
+                \\pub fn encode(allocator: std.mem.Allocator, utf8_bytes: []const u8) ![]u8 {
+                \\    var out = try allocator.alloc(u8, utf8_bytes.len);
+                \\    errdefer allocator.free(out);
+                \\    var j: usize = 0;
+                \\    var i: usize = 0;
+                \\    while (i < utf8_bytes.len) {
+                \\        const b = utf8_bytes[i];
+                \\        if (b < 0x80) { out[j] = b; j += 1; i += 1; }
+                \\        else {
+                \\            out[j] = '?'; j += 1;
+                \\            const seq_len: usize = if (b < 0xE0) 2 else if (b < 0xF0) 3 else 4;
+                \\            i += if (i + seq_len <= utf8_bytes.len) seq_len else 1;
+                \\        }
+                \\    }
+                \\    return allocator.realloc(out, j);
+                \\}
+                \\
+            else
+                \\// Stub codec — excluded from this build preset (-Dcodecs=...)
+                \\// Non-ASCII bytes decode to U+FFFD; encoding emits '?'.
+                \\const std = @import("std");
+                \\pub const fwd: []const u8 = &.{};
+                \\pub const rev: []const u8 = &.{};
+                \\pub const fwd_table: [128]u32 = [_]u32{0} ** 128;
+                \\pub const rev_base: u16 = 0x0080;
+                \\pub const rev_table: [1]u8 = .{0xFF};
+                \\pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+                \\    var out = try allocator.alloc(u8, bytes.len * 3);
+                \\    errdefer allocator.free(out);
+                \\    var j: usize = 0;
+                \\    for (bytes) |b| {
+                \\        if (b < 0x80) { out[j] = b; j += 1; }
+                \\        else { out[j] = 0xEF; out[j+1] = 0xBF; out[j+2] = 0xBD; j += 3; }
+                \\    }
+                \\    return allocator.realloc(out, j);
+                \\}
+                \\pub fn encode(allocator: std.mem.Allocator, utf8_bytes: []const u8) ![]u8 {
+                \\    var out = try allocator.alloc(u8, utf8_bytes.len);
+                \\    errdefer allocator.free(out);
+                \\    var j: usize = 0;
+                \\    var i: usize = 0;
+                \\    while (i < utf8_bytes.len) {
+                \\        const b = utf8_bytes[i];
+                \\        if (b < 0x80) { out[j] = b; j += 1; i += 1; }
+                \\        else {
+                \\            out[j] = '?'; j += 1;
+                \\            const seq_len: usize = if (b < 0xE0) 2 else if (b < 0xF0) 3 else 4;
+                \\            i += if (i + seq_len <= utf8_bytes.len) seq_len else 1;
+                \\        }
+                \\    }
+                \\    return allocator.realloc(out, j);
+                \\}
+                \\
+            ;
+
+            const stub_wf = b.addWriteFiles();
             codec_zig.* = stub_wf.add(
                 b.fmt("{s}_stub.zig", .{codec.name}),
-                stub,
+                stub_content,
             );
         } else {
             const name = b.fmt("{s}_codec.zig", .{codec.name});
@@ -144,6 +219,20 @@ pub fn build(b: *std.Build) void {
             codec_zig.* = convert_run.addOutputFileArg(name);
         }
     }
+
+    // ── PCRE2 dependency (cross-platform, no system library needed) ──────────────
+
+    const pcre2_dep = b.dependency("pcre2", .{ .target = target, .optimize = optimize });
+    const pcre2_lib = pcre2_dep.artifact("pcre2-8");
+
+    const pcre2_mod = b.createModule(.{
+        .root_source_file = b.path("src/pcre2/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pcre2_mod.linkLibrary(pcre2_lib);
+
+    // ── Main executable ────────────────────────────────────────────────────────────
 
     const root_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -153,6 +242,9 @@ pub fn build(b: *std.Build) void {
     });
 
     addCodecImports(b, root_mod, codecs, codec_zigs);
+    root_mod.addImport("tree-sitter", ts_module);
+    root_mod.addImport("languages", languages_mod);
+    root_mod.addImport("pcre2", pcre2_mod);
 
     const exe = b.addExecutable(.{ .name = "vx", .root_module = root_mod });
     b.installArtifact(exe);
@@ -162,7 +254,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_cmd.addArgs(args);
     b.step("run", "Run the editor").dependOn(&run_cmd.step);
 
-    // ── Tests ─────────────────────────────────────────────────────────────────
+    // ── Tests ─────────────────────────────────────────────────────────────────────
 
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -172,12 +264,15 @@ pub fn build(b: *std.Build) void {
     });
 
     addCodecImports(b, test_mod, codecs, codec_zigs);
+    test_mod.addImport("tree-sitter", ts_module);
+    test_mod.addImport("languages", languages_mod);
+    test_mod.addImport("pcre2", pcre2_mod);
 
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_unit_tests = b.addRunArtifact(unit_tests);
     b.step("test", "Run unit tests").dependOn(&run_unit_tests.step);
 
-    // ── Benchmark ─────────────────────────────────────────────────────────────
+    // ── Benchmark ─────────────────────────────────────────────────────────────────────
 
     const bench_mod = b.createModule(.{
         .root_source_file = b.path("src/bench_encoding.zig"),

@@ -1,10 +1,21 @@
 .{
     .name = .vx,
     .version = "0.1.0",
+    .dependencies = .{ .tree_sitter = .{
+        .url = "git+https://github.com/tree-sitter/zig-tree-sitter.git#b55d4977d61330390fc733944da06106ff972660",
+        .hash = "tree_sitter-0.26.0-8heIf3CaAQB4SSumoGzq3gLSz2rkvXxcKFyskRWqDGBz",
+    },
+    .pcre2 = .{
+        .url = "git+https://github.com/PCRE2Project/pcre2.git#5a632d3cf0dbcc6821cfc39cacf88b19f3281791",
+        .hash = "pcre2-10.48.0-DEV-IZ6r65g2XgCWff6LG-A_f0725If3dXLUGB0udhXAA12p",
+    },
+    },
     .fingerprint = 0x66623581bf22c233,
     .paths = .{
         "src",
+        "tools",
         "build.zig",
         "build.zig.zon",
+        "languages.zon",
     },
 }
