@@ -61,6 +61,35 @@ pub fn LineCache(comptime StorageT: type) type {
             self.valid = true;
         }
 
+        /// Shift all line starts that are strictly greater than `byte_offset` forward by `delta`.
+        /// Call this for a non-newline insert so the cache stays valid without a full rebuild.
+        pub fn shiftForwardFrom(self: *Self, byte_offset: usize, delta: usize) void {
+            std.debug.assert(self.valid);
+            const starts = self.starts.items;
+            // Binary search: find first index whose start > byte_offset.
+            var lo: usize = 0;
+            var hi: usize = starts.len;
+            while (lo < hi) {
+                const mid = (lo + hi) / 2;
+                if (starts[mid] <= byte_offset) lo = mid + 1 else hi = mid;
+            }
+            for (starts[lo..]) |*s| s.* += delta;
+        }
+
+        /// Shift all line starts that are strictly greater than `byte_offset` backward by `delta`.
+        /// Call this for a non-newline delete so the cache stays valid without a full rebuild.
+        pub fn shiftBackwardFrom(self: *Self, byte_offset: usize, delta: usize) void {
+            std.debug.assert(self.valid);
+            const starts = self.starts.items;
+            var lo: usize = 0;
+            var hi: usize = starts.len;
+            while (lo < hi) {
+                const mid = (lo + hi) / 2;
+                if (starts[mid] <= byte_offset) lo = mid + 1 else hi = mid;
+            }
+            for (starts[lo..]) |*s| s.* -= delta;
+        }
+
         /// Get line count from cache (cache must be valid).
         pub fn lineCount(self: *const Self) usize {
             std.debug.assert(self.valid);

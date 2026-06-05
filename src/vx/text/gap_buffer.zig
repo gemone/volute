@@ -168,7 +168,13 @@ pub const GapBuffer = struct {
 
         const newline_count = std.mem.count(u8, text, "\n");
         self.total_newlines += newline_count;
-        self.line_cache.invalidate();
+
+        if (newline_count == 0 and self.line_cache.valid) {
+            // No new lines: shift all line starts after the insertion point forward.
+            self.line_cache.shiftForwardFrom(byte_offset, text.len);
+        } else {
+            self.line_cache.invalidate();
+        }
     }
 
     pub fn delete(self: *Self, byte_offset: usize, length: usize) !void {
@@ -183,10 +189,16 @@ pub const GapBuffer = struct {
         // Count newlines in deleted range and only invalidate cache if we deleted newlines
         const deleted_newlines = std.mem.count(u8, self.buf[byte_offset..self.gap_start], "\n");
         self.total_newlines -= deleted_newlines;
-        self.line_cache.invalidate();
 
         // Expand gap backward to cover the deleted bytes
         self.gap_start = byte_offset;
+
+        if (deleted_newlines == 0 and self.line_cache.valid) {
+            // No lines removed: shift all line starts after the deletion point backward.
+            self.line_cache.shiftBackwardFrom(byte_offset, clamped_len);
+        } else {
+            self.line_cache.invalidate();
+        }
     }
 
     pub fn charAt(self: *const Self, byte_offset: usize) ?u8 {
@@ -203,11 +215,29 @@ pub const GapBuffer = struct {
     }
 
     fn rebuildCache(self: *Self) !void {
-        try self.line_cache.rebuild(self, self.allocator, byteAt, self.len());
+        // Fast path: scan the two contiguous gap-buffer slices directly using
+        // SIMD-capable indexOfScalarPos instead of the per-byte callback.
+        const pre = self.buf[0..self.gap_start];
+        const post = self.buf[self.gap_end..];
+        self.line_cache.starts.clearRetainingCapacity();
+        try self.line_cache.starts.append(self.allocator, 0);
+
+        var search: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, pre, search, '\n')) |pos| {
+            try self.line_cache.starts.append(self.allocator, pos + 1);
+            search = pos + 1;
+        }
+        const base: usize = self.gap_start;
+        search = 0;
+        while (std.mem.indexOfScalarPos(u8, post, search, '\n')) |pos| {
+            try self.line_cache.starts.append(self.allocator, base + pos + 1);
+            search = pos + 1;
+        }
+        self.line_cache.valid = true;
     }
 
     fn ensureCache(self: *Self) !void {
-        try self.line_cache.ensure(self, self.allocator, byteAt, self.len());
+        if (!self.line_cache.valid) try self.rebuildCache();
     }
 
     pub fn lineByteRange(self: *Self, line: usize) !?LineRange {
@@ -234,10 +264,23 @@ pub const GapBuffer = struct {
 
             buf.clearRetainingCapacity();
             const total = self.len();
-            var offset = start;
-            while (offset < end and offset < total) : (offset += 1) {
-                const idx = if (offset < self.gap_start) offset else offset + (self.gap_end - self.gap_start);
-                try buf.append(self.allocator, self.buf[idx]);
+            if (end > total) return buf.items;
+            // Split the logical [start, end) range across the gap boundary.
+            // Case 1: entire range is before the gap.
+            // Case 2: entire range is in the post-gap region.
+            // Case 3: range straddles the gap — two appendSlice calls.
+            if (end <= self.gap_start) {
+                // Entirely in pre-gap region.
+                try buf.appendSlice(self.allocator, self.buf[start..end]);
+            } else if (start >= self.gap_start) {
+                // Entirely in post-gap region (physical offset adjusted).
+                const gap_size = self.gap_end - self.gap_start;
+                try buf.appendSlice(self.allocator, self.buf[start + gap_size .. end + gap_size]);
+            } else {
+                // Straddles the gap: pre-gap portion then post-gap portion.
+                try buf.appendSlice(self.allocator, self.buf[start..self.gap_start]);
+                const gap_size = self.gap_end - self.gap_start;
+                try buf.appendSlice(self.allocator, self.buf[self.gap_end .. end + gap_size]);
             }
             return buf.items;
         }
@@ -552,7 +595,7 @@ test "GapBuffer: getLine" {
     try std.testing.expectEqualStrings("ghi", line2);
 }
 
-test "GapBuffer: non-newline edits invalidate cached line offsets" {
+test "GapBuffer: non-newline edits keep cache valid with updated offsets" {
     var gb = try GapBuffer.init(std.testing.allocator);
     defer gb.deinit(std.testing.allocator);
 
@@ -563,15 +606,17 @@ test "GapBuffer: non-newline edits invalidate cached line offsets" {
     _ = try gb.getLine(1, &buf);
     try std.testing.expect(gb.line_cache.isValid());
 
+    // Non-newline insert: cache stays valid, line starts are updated incrementally.
     try gb.insert(0, "X");
-    try std.testing.expect(!gb.line_cache.isValid());
+    try std.testing.expect(gb.line_cache.isValid());
     try std.testing.expectEqual(@as(?usize, 5), try gb.posToOffset(1, 0));
 
     _ = try gb.getLine(1, &buf);
     try std.testing.expect(gb.line_cache.isValid());
 
+    // Non-newline delete: cache stays valid, line starts are updated incrementally.
     try gb.delete(0, 1);
-    try std.testing.expect(!gb.line_cache.isValid());
+    try std.testing.expect(gb.line_cache.isValid());
     try std.testing.expectEqual(@as(?usize, 4), try gb.posToOffset(1, 0));
 }
 
