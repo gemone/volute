@@ -5,8 +5,14 @@ const enc_mod = @import("codecs/encoding.zig");
 const validation = @import("codecs/validation.zig");
 const Dir = std.Io.Dir;
 const lcfg = @import("languages");
-const lang_detect = @import("vx/language.zig");
 const grammar_detect = @import("vx/grammar.zig");
+
+fn stderrPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var buf: [256]u8 = undefined;
+    var w = std.Io.File.stderr().writerStreaming(io, &buf);
+    try w.interface.print(fmt, args);
+    try w.interface.flush();
+}
 
 // ── CLI argument types ─────────────────────────────────────────────────────────
 
@@ -58,26 +64,17 @@ fn parseArgs(
             end_of_opts = true;
         } else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--encoding")) {
             src_enc = args_iter.next() orelse {
-                var stderr_buf: [256]u8 = undefined;
-                var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-                try stderr_w.interface.print("vx: {s} requires an encoding name\n", .{arg});
-                try stderr_w.interface.flush();
+                try stderrPrint(io, "vx: {s} requires an encoding name\n", .{arg});
                 return error.InvalidArgs;
             };
         } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--to")) {
             dst_enc = args_iter.next() orelse {
-                var stderr_buf: [256]u8 = undefined;
-                var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-                try stderr_w.interface.print("vx: {s} requires an encoding name\n", .{arg});
-                try stderr_w.interface.flush();
+                try stderrPrint(io, "vx: {s} requires an encoding name\n", .{arg});
                 return error.InvalidArgs;
             };
         } else if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
             output = args_iter.next() orelse {
-                var stderr_buf: [256]u8 = undefined;
-                var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-                try stderr_w.interface.print("vx: {s} requires a file path\n", .{arg});
-                try stderr_w.interface.flush();
+                try stderrPrint(io, "vx: {s} requires a file path\n", .{arg});
                 return error.InvalidArgs;
             };
         } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--in-place")) {
@@ -89,10 +86,7 @@ fn parseArgs(
                 try gargs.append(allocator, garg);
             }
             if (gargs.items.len == 0) {
-                var stderr_buf: [256]u8 = undefined;
-                var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-                try stderr_w.interface.print("vx: --grammar requires a command (fetch, update, build, rm, list, test)\n", .{});
-                try stderr_w.interface.flush();
+                try stderrPrint(io, "vx: --grammar requires a command (fetch, update, build, rm, list, test)\n", .{});
                 gargs.deinit(allocator);
                 return error.InvalidArgs;
             }
@@ -101,10 +95,7 @@ fn parseArgs(
             printUsage(io);
             return error.HelpRequested;
         } else if (std.mem.startsWith(u8, arg, "-") and arg.len > 1) {
-            var stderr_buf: [256]u8 = undefined;
-            var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-            try stderr_w.interface.print("vx: unknown flag: {s}\n", .{arg});
-            try stderr_w.interface.flush();
+            try stderrPrint(io, "vx: unknown flag: {s}\n", .{arg});
             return error.InvalidArgs;
         } else {
             try files.append(allocator, arg);
@@ -112,17 +103,11 @@ fn parseArgs(
     }
 
     if (in_place and output != null) {
-        var stderr_buf: [256]u8 = undefined;
-        var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-        try stderr_w.interface.print("vx: -i/--in-place and -o/--output are mutually exclusive\n", .{});
-        try stderr_w.interface.flush();
+        try stderrPrint(io, "vx: -i/--in-place and -o/--output are mutually exclusive\n", .{});
         return error.InvalidArgs;
     }
     if (in_place and files.items.len == 0) {
-        var stderr_buf: [256]u8 = undefined;
-        var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-        try stderr_w.interface.print("vx: -i/--in-place requires at least one input file\n", .{});
-        try stderr_w.interface.flush();
+        try stderrPrint(io, "vx: -i/--in-place requires at least one input file\n", .{});
         return error.InvalidArgs;
     }
 
@@ -175,15 +160,9 @@ fn printUsage(io: std.Io) void {
 /// Read an entire file (or stdin when path is "-") into a new allocation.
 fn readAll(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
     if (std.mem.eql(u8, path, "-")) {
-        // Read stdin via posix since we have no stat to know the size up front.
-        var buf: std.ArrayList(u8) = .empty;
         var read_buf: [4096]u8 = undefined;
-        while (true) {
-            const n = try std.posix.read(std.posix.STDIN_FILENO, &read_buf);
-            if (n == 0) break;
-            try buf.appendSlice(allocator, read_buf[0..n]);
-        }
-        return buf.toOwnedSlice(allocator);
+        var reader = std.Io.File.stdin().reader(io, &read_buf);
+        return reader.interface.allocRemaining(allocator, .unlimited);
     }
     const cwd = Dir.cwd();
     var file = try cwd.openFile(io, path, .{});
@@ -243,10 +222,7 @@ fn transcodeOne(
     if (validation_result.is_lossy) {
         const error_msg = try validation.formatValidationError(validation_result, input_path, dst_enc);
         // Note: error_msg is allocated by page_allocator internally, don't free it with our allocator
-        var stderr_buf: [4096]u8 = undefined;
-        var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-        try stderr_w.interface.writeAll(error_msg);
-        try stderr_w.interface.flush();
+        try stderrPrint(io, "{s}", .{error_msg});
         return error.EncodingLossDetected;
     }
 
@@ -265,20 +241,14 @@ fn runBatch(allocator: std.mem.Allocator, io: std.Io, args: CliArgs) !void {
     // Resolve and validate encoding names.
     const src_forced: ?enc_mod.Encoding = if (args.src_enc) |name| blk: {
         const e = enc_mod.Encoding.fromName(name) orelse {
-            var stderr_buf: [256]u8 = undefined;
-            var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-            try stderr_w.interface.print("vx: unknown source encoding: {s}\n", .{name});
-            try stderr_w.interface.flush();
+            try stderrPrint(io, "vx: unknown source encoding: {s}\n", .{name});
             return error.UnknownEncoding;
         };
         break :blk e;
     } else null;
 
     const dst_enc = enc_mod.Encoding.fromName(args.dst_enc) orelse {
-        var stderr_buf: [256]u8 = undefined;
-        var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-        try stderr_w.interface.print("vx: unknown target encoding: {s}\n", .{args.dst_enc});
-        try stderr_w.interface.flush();
+        try stderrPrint(io, "vx: unknown target encoding: {s}\n", .{args.dst_enc});
         return error.UnknownEncoding;
     };
 
@@ -286,10 +256,7 @@ fn runBatch(allocator: std.mem.Allocator, io: std.Io, args: CliArgs) !void {
         // -i: transcode each input file back to itself.
         for (args.files) |path| {
             transcodeOne(allocator, io, path, path, src_forced, dst_enc) catch |err| {
-                var stderr_buf: [256]u8 = undefined;
-                var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-                try stderr_w.interface.print("vx: {s}: {s}\n", .{ path, @errorName(err) });
-                try stderr_w.interface.flush();
+                try stderrPrint(io, "vx: {s}: {s}\n", .{ path, @errorName(err) });
                 return err;
             };
         }
@@ -297,10 +264,7 @@ fn runBatch(allocator: std.mem.Allocator, io: std.Io, args: CliArgs) !void {
         // -o: exactly one input file (or stdin "-"), one output.
         const input = if (args.files.len > 0) args.files[0] else "-";
         if (args.files.len > 1) {
-            var stderr_buf: [256]u8 = undefined;
-            var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-            try stderr_w.interface.print("vx: -o accepts only one input file\n", .{});
-            try stderr_w.interface.flush();
+            try stderrPrint(io, "vx: -o accepts only one input file\n", .{});
             return error.InvalidArgs;
         }
         try transcodeOne(allocator, io, input, args.output.?, src_forced, dst_enc);
@@ -327,7 +291,6 @@ pub fn main(init: std.process.Init) !void {
     const user_lang_cfg: ?lcfg.Config = try lcfg.loadUserConfigOverride(io, allocator);
     defer if (user_lang_cfg) |cfg| lcfg.freeConfig(allocator, cfg);
     if (user_lang_cfg) |cfg| {
-        lang_detect.setLanguages(cfg.languages);
         grammar_detect.setLanguages(cfg.languages);
     }
 
@@ -340,10 +303,7 @@ pub fn main(init: std.process.Init) !void {
     // ── Batch (non-interactive) mode ──────────────────────────────────────────
     if (args.isBatch()) {
         runBatch(allocator, io, args) catch |err| {
-            var stderr_buf: [256]u8 = undefined;
-            var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-            stderr_w.interface.print("vx: transcode failed: {s}\n", .{@errorName(err)}) catch {};
-            stderr_w.interface.flush() catch {};
+            stderrPrint(io, "vx: transcode failed: {s}\n", .{@errorName(err)}) catch {};
             std.process.exit(1);
         };
         return;
@@ -372,10 +332,7 @@ pub fn main(init: std.process.Init) !void {
     // Resolve optional forced source encoding for TUI opens.
     const forced_enc: ?enc_mod.Encoding = if (args.src_enc) |name| blk: {
         const e = enc_mod.Encoding.fromName(name) orelse {
-            var stderr_buf: [256]u8 = undefined;
-            var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-            stderr_w.interface.print("vx: unknown encoding: {s}\n", .{name}) catch {};
-            stderr_w.interface.flush() catch {};
+            stderrPrint(io, "vx: unknown encoding: {s}\n", .{name}) catch {};
             std.process.exit(1);
         };
         break :blk e;
@@ -387,10 +344,7 @@ pub fn main(init: std.process.Init) !void {
         else
             editor.openFile(path);
         open_err catch |err| {
-            var stderr_buf: [256]u8 = undefined;
-            var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-            stderr_w.interface.print("vx: error opening {s}: {any}\n", .{ path, err }) catch {};
-            stderr_w.interface.flush() catch {};
+            stderrPrint(io, "vx: error opening {s}: {any}\n", .{ path, err }) catch {};
         };
     }
 
@@ -401,16 +355,30 @@ pub fn main(init: std.process.Init) !void {
 
     try @import("vx/view.zig").render(&editor);
     while (!editor.should_quit) {
-        const key = editor.terminal.readKey() catch |err| {
+        const ev = editor.terminal.readEvent() catch |err| {
             if (err == error.WouldBlock or err == error.SystemResources) continue;
             return err;
         };
 
-        if (key) |k| {
-            try drainQueuedInput(&editor, k);
-            if (!editor.should_quit) {
-                try @import("vx/view.zig").render(&editor);
+        switch (ev orelse {
+            // Timeout: check if highlight worker has a new result.
+            if (editor.highlight_worker) |w| {
+                if (w.hasResult()) try @import("vx/view.zig").render(&editor);
             }
+            continue;
+        }) {
+            .key => |k| {
+                try drainQueuedInput(&editor, k);
+                if (!editor.should_quit) try @import("vx/view.zig").render(&editor);
+            },
+            .resize => |sz| {
+                editor.terminal.size = .{ .rows = sz.rows, .cols = sz.cols };
+                try @import("vx/view.zig").render(&editor);
+            },
+            .mouse => |m| {
+                try editor.handleMouseEvent(m);
+                if (!editor.should_quit) try @import("vx/view.zig").render(&editor);
+            },
         }
     }
 }
@@ -437,11 +405,13 @@ fn drainQueuedInput(editor: *Editor, first_key: @import("vx/key.zig").Key) !void
     while (pending) |key| {
         pending = null;
         if (editor.mode == .insert and isBurstInsertKey(key)) {
+            // Batch consecutive printable characters into one insert to minimise
+            // allocations and intermediate renders while typing quickly.
             text_burst.clearRetainingCapacity();
             try appendBurstInsertBytes(editor.allocator, &text_burst, key);
 
             while (true) {
-                const next = try readKeyNonBlocking(&editor.terminal);
+                const next = try editor.terminal.readKeyNonBlocking();
                 if (next == null) break;
                 if (editor.mode != .insert or !isBurstInsertKey(next.?)) {
                     pending = next.?;
@@ -457,7 +427,9 @@ fn drainQueuedInput(editor: *Editor, first_key: @import("vx/key.zig").Key) !void
         }
 
         try editor.handleKey(key);
-        pending = try readKeyNonBlocking(&editor.terminal);
+        // Only drain already-buffered keys (0 ms poll). Movement/edit keys each
+        // get their own render so the cursor visibly advances on every repeat.
+        pending = try editor.terminal.readKeyNonBlocking();
     }
 }
 
@@ -482,10 +454,7 @@ fn runGrammarCommand(io: std.Io, allocator: std.mem.Allocator, gargs: []const []
     const cmd_args = gargs[1..];
 
     const runtime_dir = vx_runtime.findGrammarsDir(io, allocator) catch |err| {
-        var stderr_buf: [256]u8 = undefined;
-        var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-        try stderr_w.interface.print("vx --grammar: could not determine runtime dir: {s}\n", .{@errorName(err)});
-        try stderr_w.interface.flush();
+        try stderrPrint(io, "vx --grammar: could not determine runtime dir: {s}\n", .{@errorName(err)});
         return err;
     };
     defer allocator.free(runtime_dir);
@@ -501,19 +470,10 @@ fn runGrammarCommand(io: std.Io, allocator: std.mem.Allocator, gargs: []const []
     } else if (std.mem.eql(u8, cmd, "rm")) {
         return grammarRm(io, allocator, cmd_args, runtime_dir);
     } else if (std.mem.eql(u8, cmd, "test")) {
-        var stderr_buf: [256]u8 = undefined;
-        var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-        try stderr_w.interface.writeAll("vx --grammar test: not yet implemented — use 'zig build grammar -- test'\n");
-        try stderr_w.interface.flush();
+        try stderrPrint(io, "vx --grammar test: not yet implemented \xe2\x80\x94 use 'zig build grammar -- test'\n", .{});
         return error.CommandNotImplemented;
     } else {
-        var stderr_buf: [256]u8 = undefined;
-        var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-        try stderr_w.interface.print(
-            "vx --grammar: unknown command '{s}'\nAvailable: fetch, update, build, rm, list\n",
-            .{cmd},
-        );
-        try stderr_w.interface.flush();
+        try stderrPrint(io, "vx --grammar: unknown command '{s}'\nAvailable: fetch, update, build, rm, list\n", .{cmd});
         return error.UnknownGrammarCommand;
     }
 }
@@ -549,10 +509,7 @@ fn grammarFetch(io: std.Io, allocator: std.mem.Allocator, args: []const []const 
         // --save=<name> <url> mode: fetch + save to user config
         const name = args[0]["--save=".len..];
         if (args.len < 2) {
-            var stderr_buf: [256]u8 = undefined;
-            var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-            try stderr_w.interface.print("vx --grammar fetch --save={s}: missing <url>\n", .{name});
-            try stderr_w.interface.flush();
+            try stderrPrint(io, "vx --grammar fetch --save={s}: missing <url>\n", .{name});
             return error.MissingArgument;
         }
         const raw_url = args[1];
@@ -574,10 +531,7 @@ fn grammarFetch(io: std.Io, allocator: std.mem.Allocator, args: []const []const 
 
         // Determine write path
         const config_path = try grammarConfigWritePath(allocator) orelse {
-            var stderr_buf: [256]u8 = undefined;
-            var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-            try stderr_w.interface.writeAll("vx --grammar fetch --save: set VOLUTE_CONFIG_PATH to enable config writes\n");
-            try stderr_w.interface.flush();
+            try stderrPrint(io, "vx --grammar fetch --save: set VOLUTE_CONFIG_PATH to enable config writes\n", .{});
             return error.NoConfigPath;
         };
         defer allocator.free(config_path);
@@ -660,23 +614,14 @@ fn fetchAndVerifyGrammar(
     defer allocator.free(result.hash);
 
     if (g.hash.len > 0 and !std.mem.eql(u8, result.hash, g.hash)) {
-        var stderr_buf: [512]u8 = undefined;
-        var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-        try stderr_w.interface.print(
-            "  HASH MISMATCH for '{s}':\n    expected: {s}\n    got:      {s}\n",
-            .{ g.name, g.hash, result.hash },
-        );
-        try stderr_w.interface.flush();
+        try stderrPrint(io, "  HASH MISMATCH for '{s}':\n    expected: {s}\n    got:      {s}\n", .{ g.name, g.hash, result.hash });
         return error.HashMismatch;
     }
 }
 
 fn grammarUpdate(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, runtime_dir: []const u8) !void {
     const config_path = try grammarConfigWritePath(allocator) orelse {
-        var stderr_buf: [256]u8 = undefined;
-        var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-        try stderr_w.interface.writeAll("vx --grammar update: set VOLUTE_CONFIG_PATH to enable config writes\n");
-        try stderr_w.interface.flush();
+        try stderrPrint(io, "vx --grammar update: set VOLUTE_CONFIG_PATH to enable config writes\n", .{});
         return error.NoConfigPath;
     };
     defer allocator.free(config_path);
@@ -764,19 +709,13 @@ fn grammarBuild(io: std.Io, allocator: std.mem.Allocator, args: []const []const 
 
 fn grammarRm(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, runtime_dir: []const u8) !void {
     if (args.len == 0) {
-        var stderr_buf: [256]u8 = undefined;
-        var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-        try stderr_w.interface.writeAll("vx --grammar rm: missing <name>\n");
-        try stderr_w.interface.flush();
+        try stderrPrint(io, "vx --grammar rm: missing <name>\n", .{});
         return error.MissingArgument;
     }
     const name = args[0];
 
     const config_path = try grammarConfigWritePath(allocator) orelse {
-        var stderr_buf: [256]u8 = undefined;
-        var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-        try stderr_w.interface.writeAll("vx --grammar rm: set VOLUTE_CONFIG_PATH to enable config writes\n");
-        try stderr_w.interface.flush();
+        try stderrPrint(io, "vx --grammar rm: set VOLUTE_CONFIG_PATH to enable config writes\n", .{});
         return error.NoConfigPath;
     };
     defer allocator.free(config_path);
@@ -798,10 +737,7 @@ fn grammarRm(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8,
     }
 
     if (!found) {
-        var stderr_buf: [256]u8 = undefined;
-        var stderr_w = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-        try stderr_w.interface.print("vx --grammar rm: '{s}' not found in config\n", .{name});
-        try stderr_w.interface.flush();
+        try stderrPrint(io, "vx --grammar rm: '{s}' not found in config\n", .{name});
         return error.GrammarNotFound;
     }
 
@@ -839,10 +775,7 @@ fn appendBurstInsertBytes(allocator: std.mem.Allocator, buf: *std.ArrayList(u8),
 }
 
 fn readKeyNonBlocking(tty: *@import("vx/terminal.zig").Terminal) !?@import("vx/key.zig").Key {
-    return tty.readKey() catch |err| switch (err) {
-        error.WouldBlock, error.SystemResources => null,
-        else => return err,
-    };
+    return tty.readKeyNonBlocking();
 }
 
 test "main: burst batching ignores modified shortcut keys" {
@@ -851,7 +784,12 @@ test "main: burst batching ignores modified shortcut keys" {
     const utf8_bytes = [_]u8{ 0xE5, 0xA5, 0xBD };
 
     try std.testing.expect(isBurstInsertKey(Key.init(.lower_a)));
+
     try std.testing.expect(isBurstInsertKey(Key.initUtf8(&utf8_bytes)));
+    var unicode_alt_key = Key.initUtf8(&utf8_bytes);
+    unicode_alt_key.mod.alt = true;
+    try std.testing.expect(!isBurstInsertKey(unicode_alt_key));
+
     try std.testing.expect(!isBurstInsertKey(Key.initCtrl(.lower_a)));
     try std.testing.expect(!isBurstInsertKey(Key.initAlt(.lower_x)));
 }

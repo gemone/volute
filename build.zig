@@ -232,6 +232,97 @@ pub fn build(b: *std.Build) void {
     });
     pcre2_mod.linkLibrary(pcre2_lib);
 
+    // ── notcurses (compiled from source, no system install needed) ────────────────
+
+    const nc_dep = b.dependency("notcurses", .{});
+
+    // Hand-craft the two CMake-generated headers (no multimedia, no GPM, no deflate).
+    const nc_gen = b.addWriteFiles();
+    _ = nc_gen.add("builddef.h",
+        \\// Generated for zig build (no multimedia, no GPM, no deflate)
+        \\#pragma once
+        \\#define NOTCURSES_SHARE "/usr/share/notcurses"
+    );
+    _ = nc_gen.add("version.h",
+        \\// Generated for zig build
+        \\#pragma once
+        \\#ifndef NOTCURSES_VERSION_HEADER
+        \\#define NOTCURSES_VERSION_HEADER
+        \\#define NOTCURSES_VERNUM_MAJOR 3
+        \\#define NOTCURSES_VERNUM_MINOR 0
+        \\#define NOTCURSES_VERNUM_PATCH 17
+        \\#define NOTCURSES_VERNUM_TWEAK 0
+        \\#define NOTCURSES_VERSION_MAJOR "3"
+        \\#define NOTCURSES_VERSION_MINOR "0"
+        \\#define NOTCURSES_VERSION_PATCH "17"
+        \\#define NOTCURSES_VERSION_TWEAK "0"
+        \\#define NOTCURSES_VERSION_COMPARABLE(major, minor, patch) \
+        \\  (((major) << 16u) + ((minor) << 8u) + (patch))
+        \\#define NOTCURSES_VERNUM_ORDERED NOTCURSES_VERSION_COMPARABLE( \
+        \\  NOTCURSES_VERNUM_MAJOR, NOTCURSES_VERNUM_MINOR, NOTCURSES_VERNUM_PATCH)
+        \\#endif
+    );
+
+    const nc_cflags = &[_][]const u8{
+        "-std=gnu11",           // sixel.c uses typeof() GNU extension
+        "-D_GNU_SOURCE",        "-D_DEFAULT_SOURCE",
+        "-Wno-unused-function", "-Wno-deprecated-declarations",
+    };
+
+    const nc_mod = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+    nc_mod.addCSourceFiles(.{
+        .root = nc_dep.path("src/lib"),
+        .files = &.{
+            "automaton.c", "banner.c",   "blit.c",     "debug.c",
+            "direct.c",    "egcpool.c",  "fade.c",     "fd.c",
+            "fill.c",      "gpm.c",      "in.c",       "kitty.c",
+            "layout.c",    "linux.c",    "menu.c",     "metric.c",
+            "mice.c",      "notcurses.c","plot.c",     "progbar.c",
+            "reader.c",    "reel.c",     "render.c",   "selector.c",
+            "sixel.c",     "sprite.c",   "stats.c",    "tabbed.c",
+            "termdesc.c",  "tree.c",     "unixsig.c",  "util.c",
+            "visual.c",    "windows.c",
+        },
+        .flags = nc_cflags,
+    });
+    nc_mod.addCSourceFiles(.{
+        .root = nc_dep.path("src/compat"),
+        .files = &.{"compat.c"},
+        .flags = nc_cflags,
+    });
+    nc_mod.addIncludePath(nc_dep.path("include"));
+    nc_mod.addIncludePath(nc_dep.path("src"));
+    nc_mod.addIncludePath(nc_dep.path("src/lib"));
+    nc_mod.addIncludePath(nc_gen.getDirectory());
+    // Platform-specific system libraries for notcurses.
+    if (target.result.os.tag == .windows) {
+        nc_mod.addCMacro("NOMINMAX", "1");
+        nc_mod.addCMacro("WIN32_LEAN_AND_MEAN", "1");
+        nc_mod.linkSystemLibrary("ntdll", .{});
+        nc_mod.linkSystemLibrary("user32", .{});
+    } else {
+        nc_mod.linkSystemLibrary("tinfo", .{});
+        nc_mod.linkSystemLibrary("unistring", .{});
+    }
+    nc_mod.linkSystemLibrary("z", .{});
+
+    const notcurses_lib = b.addLibrary(.{
+        .name = "notcurses",
+        .linkage = .static,
+        .root_module = nc_mod,
+    });
+
+    // Translate notcurses C headers to Zig (Zig 0.16 @cImport replacement).
+    const nc_translate = b.addTranslateC(.{
+        .root_source_file = b.path("src/vx/notcurses.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    nc_translate.addIncludePath(nc_dep.path("include"));
+    nc_translate.addIncludePath(nc_gen.getDirectory());
+    nc_translate.defineCMacro("_GNU_SOURCE", null);
+    const nc_c_mod = nc_translate.createModule();
+
     // ── Main executable ────────────────────────────────────────────────────────────
 
     const root_mod = b.createModule(.{
@@ -245,6 +336,9 @@ pub fn build(b: *std.Build) void {
     root_mod.addImport("tree-sitter", ts_module);
     root_mod.addImport("languages", languages_mod);
     root_mod.addImport("pcre2", pcre2_mod);
+    root_mod.linkLibrary(notcurses_lib);
+    root_mod.addIncludePath(nc_dep.path("include"));
+    root_mod.addImport("notcurses_c", nc_c_mod);
 
     const exe = b.addExecutable(.{ .name = "vx", .root_module = root_mod });
     b.installArtifact(exe);
@@ -267,23 +361,79 @@ pub fn build(b: *std.Build) void {
     test_mod.addImport("tree-sitter", ts_module);
     test_mod.addImport("languages", languages_mod);
     test_mod.addImport("pcre2", pcre2_mod);
+    test_mod.linkLibrary(notcurses_lib);
+    test_mod.addIncludePath(nc_dep.path("include"));
+    test_mod.addImport("notcurses_c", nc_c_mod);
 
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_unit_tests = b.addRunArtifact(unit_tests);
     b.step("test", "Run unit tests").dependOn(&run_unit_tests.step);
 
-    // ── Benchmark ─────────────────────────────────────────────────────────────────────
+    // ── Highlight benchmark ───────────────────────────────────────────────────────────
 
-    const bench_mod = b.createModule(.{
-        .root_source_file = b.path("src/bench_encoding.zig"),
+    // Bench needs all modules at ReleaseFast to avoid ubsan symbol mismatches.
+    const bench_ts_dep = b.dependency("tree_sitter", .{ .target = target, .optimize = .ReleaseFast });
+    const bench_ts_mod = bench_ts_dep.module("tree_sitter");
+
+    const bench_pcre2_dep = b.dependency("pcre2", .{ .target = target, .optimize = .ReleaseFast });
+    const bench_pcre2_lib = bench_pcre2_dep.artifact("pcre2-8");
+    const bench_pcre2_mod = b.createModule(.{
+        .root_source_file = b.path("src/pcre2/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    bench_pcre2_mod.linkLibrary(bench_pcre2_lib);
+
+    const bench_languages_mod = b.createModule(.{
+        .root_source_file = b.path("src/languages/config.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    bench_languages_mod.addAnonymousImport("default_config_languages", .{
+        .root_source_file = b.path("languages.zon"),
+    });
+
+    const treesitter_mod = b.createModule(.{
+        .root_source_file = b.path("src/vx/treesitter.zig"),
         .target = target,
         .optimize = .ReleaseFast,
         .link_libc = true,
     });
+    treesitter_mod.addImport("tree-sitter", bench_ts_mod);
+    treesitter_mod.addImport("pcre2", bench_pcre2_mod);
+    treesitter_mod.addImport("languages", bench_languages_mod);
 
-    addCodecImports(b, bench_mod, codecs, codec_zigs);
+    const bench_hl_mod = b.createModule(.{
+        .root_source_file = b.path("bench/highlight_bench.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
+    bench_hl_mod.addImport("treesitter", treesitter_mod);
 
-    const bench_exe = b.addExecutable(.{ .name = "bench_encoding", .root_module = bench_mod });
-    const run_bench = b.addRunArtifact(bench_exe);
-    b.step("bench", "Run encoding throughput benchmark").dependOn(&run_bench.step);
+    const bench_hl_exe = b.addExecutable(.{ .name = "bench_highlight", .root_module = bench_hl_mod });
+    const run_bench_hl = b.addRunArtifact(bench_hl_exe);
+    run_bench_hl.setCwd(b.path("."));
+    b.step("bench-highlight", "Run parse+highlight benchmark (requires runtime/grammars/)").dependOn(&run_bench_hl.step);
+
+    // ── Render benchmark ──────────────────────────────────────────────────────────
+
+    const bench_render_mod = b.createModule(.{
+        .root_source_file = b.path("src/bench_render_main.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
+    bench_render_mod.addImport("tree-sitter", bench_ts_mod);
+    bench_render_mod.addImport("pcre2", bench_pcre2_mod);
+    bench_render_mod.addImport("languages", bench_languages_mod);
+    bench_render_mod.linkLibrary(notcurses_lib);
+    bench_render_mod.addIncludePath(nc_dep.path("include"));
+    bench_render_mod.addImport("notcurses_c", nc_c_mod);
+    addCodecImports(b, bench_render_mod, codecs, codec_zigs);
+
+    const bench_render_exe = b.addExecutable(.{ .name = "bench_render", .root_module = bench_render_mod });
+    const run_bench_render = b.addRunArtifact(bench_render_exe);
+    run_bench_render.setCwd(b.path("."));
+    b.step("bench-render", "Run render latency benchmark (outputs mean_us/min_us)").dependOn(&run_bench_render.step);
 }
