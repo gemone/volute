@@ -10,6 +10,20 @@ const encoding = @import("../codecs/encoding.zig");
 const validation = @import("../codecs/validation.zig");
 const line_ending = @import("line_ending.zig");
 
+/// A language-agnostic description of a text edit for incremental tree-sitter parsing.
+/// Stored on the Buffer so the renderer can pass it to tree-sitter before re-parsing.
+pub const TreeEditHint = struct {
+    start_byte: u32,
+    old_end_byte: u32,
+    new_end_byte: u32,
+    start_row: u32,
+    start_col: u32,
+    old_end_row: u32,
+    old_end_col: u32,
+    new_end_row: u32,
+    new_end_col: u32,
+};
+
 pub const Buffer = struct {
     const Self = @This();
     const ADAPTIVE_TREE_OPEN_THRESHOLD: usize = 1 * 1024 * 1024;
@@ -26,6 +40,9 @@ pub const Buffer = struct {
     backend_strategy: Strategy,
     path: ?[]const u8,
     dirty: bool,
+    /// Incremented on every content mutation (insert/delete/undo/redo).
+    /// Used by the renderer to skip re-highlighting when source is unchanged.
+    content_version: u64,
     /// Encoding used in the on-disk file (default: utf8).
     file_encoding: encoding.Encoding,
     /// Line-ending style used in the on-disk file (default: lf).
@@ -44,6 +61,11 @@ pub const Buffer = struct {
     last_edit_offset: ?usize,
     localized_edit_streak: usize,
     dispersed_edit_streak: usize,
+
+    /// Pending tree-sitter edit hint: set by finishMutation, consumed by the renderer
+    /// to annotate grammar.prev_tree before incremental re-parsing.
+    /// Null if no edit was recorded or a batch/undo operation reset it.
+    pending_tree_edit: ?TreeEditHint,
 
     // Rendering cache: tracks which lines have been modified since last render
     render_cache: RenderCache,
@@ -150,6 +172,7 @@ pub const Buffer = struct {
             .backend_strategy = resolved_strategy,
             .path = null,
             .dirty = false,
+            .content_version = 0,
             .file_encoding = .utf8,
             .file_line_ending = .lf,
             .has_bom = false,
@@ -160,6 +183,7 @@ pub const Buffer = struct {
             .last_edit_offset = null,
             .localized_edit_streak = 0,
             .dispersed_edit_streak = 0,
+            .pending_tree_edit = null,
             .render_cache = .{
                 .dirty_lines = try std.ArrayList(bool).initCapacity(allocator, initial_lines),
             },
@@ -420,6 +444,8 @@ pub const Buffer = struct {
     fn afterHistoryReplay(self: *Self) !void {
         self.resetAdaptiveTracking();
         self.dirty = true;
+        self.content_version +%= 1;
+        self.pending_tree_edit = null; // undo/redo: fall back to full re-scan
         if (self.text.lineCount() != self.render_cache.dirty_lines.items.len) {
             try self.render_cache.resize(self.allocator, self.text.lineCount());
         }
@@ -679,33 +705,33 @@ pub const Buffer = struct {
 
     pub fn prevColumn(self: *Self, row: usize, col: usize) usize {
         const line = self.getLine(row) orelse return 0;
-        return utf8PrevBoundary(line, col);
+        return utf8.boundary(line).prev(col);
     }
 
     pub fn nextColumn(self: *Self, row: usize, col: usize) usize {
         const line = self.getLine(row) orelse return 0;
-        return utf8NextBoundary(line, col);
+        return utf8.boundary(line).next(col);
     }
 
     pub fn charSliceAt(self: *Self, pos: Position) ?[]const u8 {
         const line = self.getLine(pos.row) orelse return null;
         if (line.len == 0 or pos.col >= line.len) return null;
 
-        const start = utf8FloorBoundary(line, pos.col);
-        const end = utf8NextBoundary(line, start);
+        const start = utf8.boundary(line).floor(pos.col);
+        const end = utf8.boundary(line).next(start);
         if (end <= start) return null;
         return line[start..end];
     }
 
     pub fn insertCharAt(self: *Self, pos: Position, ch: u8) !void {
         const offset = (try self.text.posToOffset(pos.row, pos.col)) orelse return;
-        try self.replaceRange(offset, 0, &[_]u8{ch});
+        try self.replaceRangeKnownPos(offset, 0, &[_]u8{ch}, pos);
     }
 
     pub fn insertBytesAt(self: *Self, pos: Position, bytes: []const u8) !void {
         if (bytes.len == 0) return;
         const offset = (try self.text.posToOffset(pos.row, pos.col)) orelse return;
-        try self.replaceRange(offset, 0, bytes);
+        try self.replaceRangeKnownPos(offset, 0, bytes, pos);
     }
 
     pub fn deleteCharAt(self: *Self, pos: Position) !?u8 {
@@ -716,20 +742,20 @@ pub const Buffer = struct {
             // Join with previous line: delete the newline at end of (row-1)
             const prev_line = self.getLine(pos.row - 1) orelse return null;
             const newline_off = (try self.text.posToOffset(pos.row - 1, prev_line.len)) orelse return null;
-            try self.replaceRange(newline_off, 1, "");
+            try self.replaceRangeKnownPos(newline_off, 1, "", .{ .row = pos.row - 1, .col = prev_line.len });
             self.render_cache.markDirtyFrom(pos.row - 1);
             return '\n';
         }
 
         if (pos.col > line.len) return null;
 
-        const delete_start = utf8PrevBoundary(line, pos.col);
-        const delete_end = utf8NextBoundary(line, delete_start);
+        const delete_start = utf8.boundary(line).prev(pos.col);
+        const delete_end = utf8.boundary(line).next(delete_start);
         if (delete_end <= delete_start) return null;
 
         const ch = line[delete_start];
         const offset = (try self.text.posToOffset(pos.row, delete_start)) orelse return null;
-        try self.replaceRange(offset, delete_end - delete_start, "");
+        try self.replaceRangeKnownPos(offset, delete_end - delete_start, "", .{ .row = pos.row, .col = delete_start });
         return ch;
     }
 
@@ -800,8 +826,8 @@ pub const Buffer = struct {
         const line = self.getLine(row) orelse return;
         if (line.len == 0 or col >= line.len) return;
 
-        const start = utf8FloorBoundary(line, col);
-        const end = utf8NextBoundary(line, start);
+        const start = utf8.boundary(line).floor(col);
+        const end = utf8.boundary(line).next(start);
         if (end <= start) return;
 
         const offset = (try self.text.posToOffset(row, start)) orelse return;
@@ -834,17 +860,10 @@ pub const Buffer = struct {
     }
 
     pub fn deleteLine(self: *Self, row: usize) !void {
-        const range = (try self.text.lineByteRange(row)) orelse return;
-        const end_off = if (row + 1 < self.text.lineCount())
-            range.end
-        else
-            self.text.len();
-        try self.replaceRange(range.start, end_off - range.start, "");
-        self.render_cache.markDirtyFrom(row);
+        return self.deleteLines(row, row + 1);
     }
 
-    pub fn joinLines(self: *Self, row: usize, allocator: std.mem.Allocator) !void {
-        _ = allocator;
+    pub fn joinLines(self: *Self, row: usize) !void {
         const line1 = self.getLine(row) orelse return;
         const line2 = self.getLine(row + 1) orelse return;
         const trimmed = std.mem.trimStart(u8, line2, " \t");
@@ -857,6 +876,10 @@ pub const Buffer = struct {
     }
 
     fn replaceRange(self: *Self, offset: usize, delete_len: usize, insert_bytes: []const u8) !void {
+        try self.replaceRangeKnownPos(offset, delete_len, insert_bytes, null);
+    }
+
+    fn replaceRangeKnownPos(self: *Self, offset: usize, delete_len: usize, insert_bytes: []const u8, known_pos: ?Position) !void {
         const state = MutationState{
             .strategy = self.backend_strategy,
             .dirty = self.dirty,
@@ -871,7 +894,7 @@ pub const Buffer = struct {
         errdefer self.allocator.free(inserted);
 
         try self.applyRecordedDelta(offset, deleted, insert_bytes);
-        self.finishMutation(offset, deleted, inserted) catch |err| {
+        self.finishMutation(offset, deleted, inserted, known_pos) catch |err| {
             try self.rollbackReplaceRange(offset, deleted, inserted, state);
             return err;
         };
@@ -896,20 +919,19 @@ pub const Buffer = struct {
         return line[0..i];
     }
 
-    pub fn clampPos(self: *Self, pos: Position) Position {
+    fn clampPosMode(self: *Self, pos: Position, comptime insert: bool) Position {
         const rows = self.text.lineCount();
         const row = @min(pos.row, if (rows > 0) rows - 1 else 0);
         const line = self.getLine(row) orelse "";
-        const col = alignColumn(line, pos.col, false);
-        return .{ .row = row, .col = col };
+        return .{ .row = row, .col = utf8.boundary(line).alignColumn(pos.col, insert) };
+    }
+
+    pub fn clampPos(self: *Self, pos: Position) Position {
+        return self.clampPosMode(pos, false);
     }
 
     pub fn clampPosInsert(self: *Self, pos: Position) Position {
-        const rows = self.text.lineCount();
-        const row = @min(pos.row, if (rows > 0) rows - 1 else 0);
-        const line = self.getLine(row) orelse "";
-        const col = alignColumn(line, pos.col, true);
-        return .{ .row = row, .col = col };
+        return self.clampPosMode(pos, true);
     }
 
     fn resolveStrategy(requested: Strategy, size_hint: usize) Strategy {
@@ -942,26 +964,75 @@ pub const Buffer = struct {
         self.last_edit_offset = offset;
     }
 
-    fn finishMutation(self: *Self, offset: usize, deleted: []u8, inserted: []u8) !void {
+    fn finishMutation(self: *Self, offset: usize, deleted: []u8, inserted: []u8, known_pos: ?Position) !void {
         const magnitude = deleted.len + inserted.len;
         const spans_lines = std.mem.indexOfScalar(u8, deleted, '\n') != null or std.mem.indexOfScalar(u8, inserted, '\n') != null;
         self.recordEdit(offset);
-        try self.adaptBackend(offset, magnitude);
+        try self.adaptBackend(magnitude);
         self.dirty = true;
+        self.content_version +%= 1;
         if (spans_lines) {
             if (self.text.lineCount() != self.render_cache.dirty_lines.items.len) {
                 try self.render_cache.resize(self.allocator, self.text.lineCount());
             }
         }
 
-        const pos = try self.text.offsetToPos(offset);
+        // Use caller-supplied position when available to avoid rebuilding the line cache.
+        const pos = known_pos orelse try self.text.offsetToPos(offset);
         if (spans_lines) {
             self.render_cache.markDirtyFrom(pos.row);
         } else {
             self.render_cache.markDirty(pos.row);
         }
+
+        // Record a tree-sitter edit hint so the renderer can annotate the parse
+        // tree before incremental re-parsing, enabling O(edit_region) re-scans.
+        self.pending_tree_edit = buildTreeEditHint(
+            offset, deleted, inserted,
+            @intCast(pos.row), @intCast(pos.col),
+        );
+
         try self.recordDelta(offset, deleted, inserted);
     }
+
+    /// Compute a `TreeEditHint` from the byte offset and the deleted/inserted slices.
+    /// `start_row`/`start_col` are the row/column of `offset` in the current text
+    /// (valid for both old and new text since bytes before `offset` are unchanged).
+    fn buildTreeEditHint(offset: usize, deleted: []const u8, inserted: []const u8, start_row: u32, start_col: u32) TreeEditHint {
+        const old_end = computeEditEndPoint(start_row, start_col, deleted);
+        const new_end = computeEditEndPoint(start_row, start_col, inserted);
+        return .{
+            .start_byte = @intCast(offset),
+            .old_end_byte = @intCast(offset + deleted.len),
+            .new_end_byte = @intCast(offset + inserted.len),
+            .start_row = start_row,
+            .start_col = start_col,
+            .old_end_row = old_end.row,
+            .old_end_col = old_end.col,
+            .new_end_row = new_end.row,
+            .new_end_col = new_end.col,
+        };
+    }
+
+    /// Given the start point of an edit and the bytes affected, compute the end point.
+    fn computeEditEndPoint(row: u32, col: u32, bytes: []const u8) struct { row: u32, col: u32 } {
+        var r = row;
+        var last_nl: usize = 0;
+        var has_nl = false;
+        for (bytes, 0..) |b, i| {
+            if (b == '\n') {
+                r += 1;
+                last_nl = i + 1;
+                has_nl = true;
+            }
+        }
+        const c: u32 = if (has_nl)
+            @intCast(bytes.len - last_nl)
+        else
+            col + @as(u32, @intCast(bytes.len));
+        return .{ .row = r, .col = c };
+    }
+
 
     fn rollbackReplaceRange(self: *Self, offset: usize, deleted: []const u8, inserted: []const u8, state: MutationState) !void {
         try self.applyRecordedDelta(offset, inserted, deleted);
@@ -976,8 +1047,7 @@ pub const Buffer = struct {
         self.render_cache.invalidateAll();
     }
 
-    fn adaptBackend(self: *Self, offset: usize, magnitude: usize) !void {
-        _ = offset;
+    fn adaptBackend(self: *Self, magnitude: usize) !void {
         const len = self.text.len();
         const target = switch (self.backend_strategy) {
             .gap_buffer => if (len >= ADAPTIVE_TREE_GROW_THRESHOLD and
@@ -1019,22 +1089,6 @@ pub const Buffer = struct {
     }
 };
 
-fn utf8FloorBoundary(line: []const u8, col: usize) usize {
-    return utf8.boundary(line).floor(col);
-}
-
-fn utf8PrevBoundary(line: []const u8, col: usize) usize {
-    return utf8.boundary(line).prev(col);
-}
-
-fn utf8NextBoundary(line: []const u8, col: usize) usize {
-    return utf8.boundary(line).next(col);
-}
-
-fn alignColumn(line: []const u8, col: usize, allow_eol: bool) usize {
-    return utf8.boundary(line).alignColumn(col, allow_eol);
-}
-
 test "Buffer: init with auto strategy" {
     const allocator = std.testing.allocator;
     var buf = try Buffer.init(allocator);
@@ -1072,15 +1126,9 @@ test "Buffer: empty buffer insertion" {
     // Verify it worked
     try std.testing.expectEqual(@as(usize, 1), buf.text.len());
 
-    const line = buf.getLine(0) orelse {
-        std.debug.print("ERROR: getLine(0) returned null!\n", .{});
-        return error.TestFailed;
-    };
-
-    if (line.len != 1 or line[0] != 'h') {
-        std.debug.print("ERROR: Expected 'h', got '{any}'\n", .{line});
-        return error.TestFailed;
-    }
+    const line = buf.getLine(0) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), line.len);
+    try std.testing.expectEqual(@as(u8, 'h'), line[0]);
 }
 
 test "Buffer: clamp positions snap to UTF-8 boundaries" {
@@ -1118,12 +1166,7 @@ test "Buffer: large input without corruption" {
     try std.testing.expectEqual(expected_len, buf.text.len());
 
     // Verify content is readable
-    const line = buf.getLine(0) orelse {
-        std.debug.print("ERROR: getLine(0) returned null after large insert!\n", .{});
-        return error.TestFailed;
-    };
-
-    // Line should be long but not corrupted
+    const line = buf.getLine(0) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(expected_len, line.len);
 
     // Verify content starts with expected text
@@ -1582,7 +1625,7 @@ test "Buffer: daily workflow persists after save and reopen" {
     try buf.insertCharAt(.{ .row = 0, .col = 5 }, '!');
     try buf.insertNewlineAt(.{ .row = 1, .col = 4 });
     try buf.insertCharAt(.{ .row = 2, .col = 0 }, 'B');
-    try buf.joinLines(1, allocator);
+    try buf.joinLines(1);
     try buf.insertCharAt(.{ .row = 1, .col = 0 }, '*');
     try buf.save(io);
 
