@@ -8,6 +8,7 @@ runtime/grammars
 # Zig build outputs
 zig-out/
 .zig-cache/
+zig-pkg
 
 # Temporary test files
 .copilot_*.zig
@@ -35,3 +36,4 @@ tools/codecs/*.TXT
 !tools/codecs/EUC-JP.TXT
 !tools/codecs/JIS0201.TXT
 !tools/codecs/JIS0208.TXT
+zig-pkg/
