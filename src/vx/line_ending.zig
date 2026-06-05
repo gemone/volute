@@ -41,11 +41,7 @@ pub fn detect(bytes: []const u8) LineEnding {
     const total = lf_count + crlf_count + cr_count;
     if (total == 0) return .lf;
 
-    if (crlf_count > 0 and lf_count == 0 and cr_count == 0) return .crlf;
-    if (cr_count > 0 and lf_count == 0 and crlf_count == 0) return .cr;
-    if (lf_count > 0 and crlf_count == 0 and cr_count == 0) return .lf;
-
-    // Mixed: return whichever is dominant; ties → lf
+    // Return whichever is dominant; ties → lf
     const max = @max(lf_count, @max(crlf_count, cr_count));
     if (max == lf_count) return .lf;
     if (max == crlf_count) return .crlf;
