@@ -1,0 +1,215 @@
+.{
+    // Tree-sitter grammar/language configuration for vx editor.
+    // Single source of truth for all language detection and grammar sources.
+    //
+    // .languages — array of detection metadata entries (file_types, modeline, shebangs,
+    //              glob_patterns). Each entry must have an explicit .name field.
+    //              .grammar references the tree-sitter parser to use (defaults to .name).
+    // .grammars  — array of tree-sitter sources: url + hash for `zig fetch` verification.
+    //              Each entry must have an explicit .name field.
+
+    .languages = .{
+
+        .{
+            .name = "zig",
+            .grammar = "zig",
+            .file_types = .{ ".zig", ".zon" },
+            .modeline = "zig",
+            .shebangs = .{},
+            .glob_patterns = .{},
+        },
+        .{
+            .name = "c",
+            .grammar = "c",
+            .file_types = .{ ".c", ".h" },
+            .modeline = "c",
+            .shebangs = .{},
+            .glob_patterns = .{},
+        },
+        .{
+            .name = "cpp",
+            .grammar = "cpp",
+            .file_types = .{ ".cc", ".cpp", ".cxx", ".c++", ".hh", ".hpp", ".hxx", ".h++" },
+            .modeline = "cpp",
+            .shebangs = .{},
+            .glob_patterns = .{},
+        },
+        .{
+            .name = "python",
+            .grammar = "python",
+            .file_types = .{ ".py", ".pyi", ".py3", ".pyw" },
+            .modeline = "python",
+            .shebangs = .{ "python", "python3", "python2" },
+            .glob_patterns = .{},
+        },
+        .{
+            .name = "rust",
+            .grammar = "rust",
+            .file_types = .{ ".rs" },
+            .modeline = "rust",
+            .shebangs = .{},
+            .glob_patterns = .{},
+        },
+        .{
+            .name = "javascript",
+            .grammar = "javascript",
+            .file_types = .{ ".js", ".mjs", ".cjs" },
+            .modeline = "javascript",
+            .shebangs = .{ "node" },
+            .glob_patterns = .{},
+        },
+        .{
+            .name = "go",
+            .grammar = "go",
+            .file_types = .{ ".go" },
+            .modeline = "go",
+            .shebangs = .{},
+            .glob_patterns = .{},
+        },
+        .{
+            .name = "bash",
+            .grammar = "bash",
+            .file_types = .{ ".sh", ".bash", ".zsh", ".ksh" },
+            .modeline = "sh",
+            .shebangs = .{ "sh", "bash", "zsh", "ksh", "dash" },
+            .glob_patterns = .{ ".bashrc", ".bash_profile", ".bash_logout", ".bash_aliases", ".profile", ".zshrc", ".zprofile", ".zshenv", ".zlogout", ".kshrc" },
+        },
+        .{
+            .name = "json",
+            .grammar = "json",
+            .file_types = .{ ".json", ".jsonc", ".json5" },
+            .modeline = "json",
+            .shebangs = .{},
+            .glob_patterns = .{},
+        },
+        .{
+            .name = "html",
+            .grammar = "html",
+            .file_types = .{ ".html", ".htm", ".xhtml" },
+            .modeline = "html",
+            .shebangs = .{},
+            .glob_patterns = .{},
+        },
+        .{
+            .name = "css",
+            .grammar = "css",
+            .file_types = .{ ".css" },
+            .modeline = "css",
+            .shebangs = .{},
+            .glob_patterns = .{},
+        },
+        .{
+            .name = "yaml",
+            .grammar = "yaml",
+            .file_types = .{ ".yaml", ".yml" },
+            .modeline = "yaml",
+            .shebangs = .{},
+            .glob_patterns = .{ ".prettierrc", ".clangd" },
+        },
+        .{
+            .name = "toml",
+            .grammar = "toml",
+            .file_types = .{ ".toml" },
+            .modeline = "toml",
+            .shebangs = .{},
+            .glob_patterns = .{},
+        },
+        .{
+            .name = "lua",
+            .grammar = "lua",
+            .file_types = .{ ".lua" },
+            .modeline = "lua",
+            .shebangs = .{ "lua" },
+            .glob_patterns = .{},
+        },
+        .{
+            .name = "java",
+            .grammar = "java",
+            .file_types = .{ ".java" },
+            .modeline = "java",
+            .shebangs = .{},
+            .glob_patterns = .{},
+        },
+
+    },
+
+    .grammars = .{
+
+        .{
+            .name = "zig",
+            .url = "git+https://github.com/tree-sitter-grammars/tree-sitter-zig#6479aa13",
+            .hash = "",
+        },
+        .{
+            .name = "c",
+            .url = "git+https://github.com/tree-sitter/tree-sitter-c#7fa1be1b",
+            .hash = "",
+        },
+        .{
+            .name = "cpp",
+            .url = "git+https://github.com/tree-sitter/tree-sitter-cpp#e1c2b93f",
+            .hash = "",
+        },
+        .{
+            .name = "python",
+            .url = "git+https://github.com/tree-sitter/tree-sitter-python#293fdc02",
+            .hash = "",
+        },
+        .{
+            .name = "rust",
+            .url = "git+https://github.com/tree-sitter/tree-sitter-rust#261b2022",
+            .hash = "",
+        },
+        .{
+            .name = "javascript",
+            .url = "git+https://github.com/tree-sitter/tree-sitter-javascript#3a837b6f",
+            .hash = "",
+        },
+        .{
+            .name = "go",
+            .url = "git+https://github.com/tree-sitter/tree-sitter-go#12fe553f",
+            .hash = "",
+        },
+        .{
+            .name = "bash",
+            .url = "git+https://github.com/tree-sitter/tree-sitter-bash#487734f8",
+            .hash = "",
+        },
+        .{
+            .name = "json",
+            .url = "git+https://github.com/tree-sitter/tree-sitter-json#73076754",
+            .hash = "",
+        },
+        .{
+            .name = "html",
+            .url = "git+https://github.com/tree-sitter/tree-sitter-html#cbb91a0f",
+            .hash = "",
+        },
+        .{
+            .name = "css",
+            .url = "git+https://github.com/tree-sitter/tree-sitter-css#6e327db4",
+            .hash = "",
+        },
+        .{
+            .name = "yaml",
+            .url = "git+https://github.com/ikatyang/tree-sitter-yaml#0e36bed1",
+            .hash = "",
+        },
+        .{
+            .name = "toml",
+            .url = "git+https://github.com/ikatyang/tree-sitter-toml#7cff70bb",
+            .hash = "",
+        },
+        .{
+            .name = "lua",
+            .url = "git+https://github.com/tree-sitter-grammars/tree-sitter-lua#e40f5b6e",
+            .hash = "",
+        },
+        .{
+            .name = "java",
+            .url = "git+https://github.com/tree-sitter/tree-sitter-java#09d650de",
+            .hash = "",
+        },
+
+    },
+}
