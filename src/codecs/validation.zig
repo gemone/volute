@@ -113,7 +113,7 @@ pub fn formatValidationError(result: ValidationResult, file_path: []const u8, ta
 
 test "validateUtf8ToEncoding: safe content" {
     const safe_content = "Hello, World!";
-    const result = validateUtf8ToEncoding(safe_content, .utf8);
+    const result = try validateUtf8ToEncoding(safe_content, .utf8);
     try std.testing.expect(!result.is_lossy);
     try std.testing.expectEqual(@as(usize, 0), result.lost_char_count);
 }
@@ -121,7 +121,7 @@ test "validateUtf8ToEncoding: safe content" {
 test "validateUtf8ToEncoding: lossy CP1251" {
     // Mixed Cyrillic + Chinese would be lossy in CP1251
     const lossy_content = "Привет! 世界!";
-    const result = validateUtf8ToEncoding(lossy_content, .cp1251);
+    const result = try validateUtf8ToEncoding(lossy_content, .cp1251);
     try std.testing.expect(result.is_lossy);
     try std.testing.expect(result.lost_char_count > 0);
     try std.testing.expect(result.suggestion != null);
@@ -130,7 +130,7 @@ test "validateUtf8ToEncoding: lossy CP1251" {
 test "validateUtf8ToEncoding: lossy CP1250" {
     // Latin-1 extended + Chinese would be lossy in CP1250
     const lossy_content = "ÀÁÂÃ 世界!";
-    const result = validateUtf8ToEncoding(lossy_content, .cp1250);
+    const result = try validateUtf8ToEncoding(lossy_content, .cp1250);
     try std.testing.expect(result.is_lossy);
     try std.testing.expect(result.lost_char_count > 0);
 }
