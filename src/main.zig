@@ -310,6 +310,15 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // ── TUI mode ──────────────────────────────────────────────────────────────
+    if (!terminal.hasInteractiveTty()) {
+        stderrPrint(
+            io,
+            "vx: interactive TUI requires a real terminal (stdin/stdout must be TTY)\n",
+            .{},
+        ) catch {};
+        std.process.exit(1);
+    }
+
     var editor = try Editor.init(allocator, io);
     defer editor.deinit();
 
