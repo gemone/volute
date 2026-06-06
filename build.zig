@@ -281,6 +281,13 @@ pub fn build(b: *std.Build) void {
         \\  NOTCURSES_VERNUM_MAJOR, NOTCURSES_VERNUM_MINOR, NOTCURSES_VERNUM_PATCH)
         \\#endif
     );
+    _ = nc_gen.add("compat/compat.h",
+        \\#pragma once
+        \\#ifdef __MINGW32__
+        \\#include <windows.h>
+        \\#endif
+        \\#include_next "compat/compat.h"
+    );
 
     const nc_cflags = &[_][]const u8{
         "-std=gnu11",           // sixel.c uses typeof() GNU extension
@@ -316,15 +323,14 @@ pub fn build(b: *std.Build) void {
         .files = &.{"compat.c"},
         .flags = nc_cflags,
     });
+    nc_mod.addIncludePath(nc_gen.getDirectory());
     nc_mod.addIncludePath(nc_dep.path("include"));
     nc_mod.addIncludePath(nc_dep.path("src"));
     nc_mod.addIncludePath(nc_dep.path("src/lib"));
-    nc_mod.addIncludePath(nc_gen.getDirectory());
     // Platform-specific compile settings for notcurses sources.
     if (target.result.os.tag == .windows) {
         nc_mod.addCMacro("NOMINMAX", "1");
         nc_mod.addCMacro("WIN32_LEAN_AND_MEAN", "1");
-        nc_mod.addCMacro("ULONG", "unsigned long");
         // Add MSYS2 headers ONLY for this module as after-include paths so
         // zig's bundled Windows headers win include resolution for WinAPI,
         // while notcurses can still pick up libunistring/ncurses headers.
