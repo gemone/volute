@@ -26,9 +26,9 @@ fn linkNotcursesSystemLibs(
             mod.linkSystemLibrary("notcurses", .{});
             mod.linkSystemLibrary("notcurses-core", .{});
         }
-        // Link against import libs expected by the prebuilt notcurses package.
-        mod.linkSystemLibrary("ncursesw6", .{});
-        mod.linkSystemLibrary("tinfow6", .{});
+        // notcurses-core is built against ncurses DLL imports on Windows.
+        mod.linkSystemLibrary("ncursesw", .{ .preferred_link_mode = .dynamic });
+        mod.linkSystemLibrary("tinfow", .{ .preferred_link_mode = .dynamic });
         mod.linkSystemLibrary("unistring", .{});
         mod.linkSystemLibrary("deflate", .{});
         mod.linkSystemLibrary("z", .{});
