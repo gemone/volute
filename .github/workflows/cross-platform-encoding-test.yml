@@ -14,11 +14,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         include:
           - os: ubuntu-latest
             zig-version: "0.16.0"
           - os: macos-latest
+            zig-version: "0.16.0"
+          - os: windows-latest
             zig-version: "0.16.0"
 
     steps:
@@ -42,6 +44,14 @@ jobs:
           echo "LIBRARY_PATH=/opt/homebrew/lib:/usr/local/lib:${LIBRARY_PATH}" >> "$GITHUB_ENV"
           echo "CPATH=/opt/homebrew/include:/usr/local/include:${CPATH}" >> "$GITHUB_ENV"
 
+      - name: Install Windows native dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed mingw-w64-x86_64-libunistring mingw-w64-x86_64-ncurses mingw-w64-x86_64-zlib
+          echo "CPATH=C:/msys64/mingw64/include" >> $env:GITHUB_ENV
+          echo "LIBRARY_PATH=C:/msys64/mingw64/lib" >> $env:GITHUB_ENV
+
       - name: Cache Zig dependencies
         uses: actions/cache@v5
         with:
@@ -54,7 +64,13 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-zig-v${{ matrix.zig-version }}-
 
       - name: Build project
-        run: zig build -Doptimize=ReleaseFast
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            zig build -Doptimize=ReleaseFast -Dtarget=x86_64-windows-gnu
+          else
+            zig build -Doptimize=ReleaseFast
+          fi
 
       - name: Run unit tests
         if: runner.os == 'Linux'
@@ -77,15 +93,15 @@ jobs:
             VX_BIN=./zig-out/bin/vx.exe
           fi
           TMP_DIR="$(mktemp -d)"
-          
+
           # Test ASCII round-trip
           echo "Hello World" > "$TMP_DIR/test_ascii.txt"
           "$VX_BIN" -e ascii -o "$TMP_DIR/test_output_ascii.txt" "$TMP_DIR/test_ascii.txt"
-          
+
           # Test UTF-8 round-trip
           echo "测试中文" > "$TMP_DIR/test_utf8.txt"
           "$VX_BIN" -e utf-8 -o "$TMP_DIR/test_output_utf8.txt" "$TMP_DIR/test_utf8.txt"
-          
+
           echo "✅ CLI transcoding tests passed on ${{ matrix.os }}"
 
       - name: Platform-specific encoding validation
@@ -95,7 +111,7 @@ jobs:
           echo "Architecture: ${{ runner.arch }}"
           TMP_DIR="$(mktemp -d)"
           echo "测试中文" > "$TMP_DIR/test_utf8.txt"
-          
+
           # Test platform-specific encodings
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             echo "Testing Linux-specific encodings..."
@@ -107,5 +123,5 @@ jobs:
             echo "Testing Windows-specific encodings..."
             ./zig-out/bin/vx.exe -e utf-8 -o "$TMP_DIR/test_windows.txt" "$TMP_DIR/test_utf8.txt"
           fi
-          
+
           echo "✅ Platform-specific encoding tests passed"

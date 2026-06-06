@@ -17,6 +17,10 @@ fn addCodecImports(
 
 fn linkNotcursesSystemLibs(mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
     if (target.result.os.tag == .windows) {
+        // MinGW64 (MSYS2) packages: mingw-w64-x86_64-libunistring, mingw-w64-x86_64-ncurses
+        mod.linkSystemLibrary("unistring", .{});
+        mod.linkSystemLibrary("ncursesw", .{});
+        mod.linkSystemLibrary("z", .{});
         mod.linkSystemLibrary("ntdll", .{});
         mod.linkSystemLibrary("user32", .{});
     } else if (target.result.os.tag == .macos) {
