@@ -324,10 +324,11 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .windows) {
         nc_mod.addCMacro("NOMINMAX", "1");
         nc_mod.addCMacro("WIN32_LEAN_AND_MEAN", "1");
-        // Add MSYS2 headers ONLY for this module so libunistring/ncurses
-        // headers are found without polluting zig's own Windows API headers.
+        // Add MSYS2 headers ONLY for this module as after-include paths so
+        // zig's bundled Windows headers win include resolution for WinAPI,
+        // while notcurses can still pick up libunistring/ncurses headers.
         if (msys2_include) |p| {
-            nc_mod.addIncludePath(.{ .cwd_relative = p });
+            nc_mod.addAfterIncludePath(.{ .cwd_relative = p });
         }
     }
 
