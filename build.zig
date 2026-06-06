@@ -287,6 +287,13 @@ pub fn build(b: *std.Build) void {
         "-D_GNU_SOURCE",        "-D_DEFAULT_SOURCE",
         "-Wno-unused-function", "-Wno-deprecated-declarations",
     };
+    const nc_cflags_windows = &[_][]const u8{
+        "-std=gnu11",           // sixel.c uses typeof() GNU extension
+        "-D_GNU_SOURCE",        "-D_DEFAULT_SOURCE",
+        "-Wno-unused-function", "-Wno-deprecated-declarations",
+        "-include",             "windows.h",
+    };
+    const nc_effective_cflags = if (target.result.os.tag == .windows) nc_cflags_windows else nc_cflags;
 
     // Optional: path to MSYS2 MinGW64 include dir (Windows CI).
     // Passed as -Dmsys2-include=C:/msys64/mingw64/include so that only
@@ -309,12 +316,12 @@ pub fn build(b: *std.Build) void {
             "termdesc.c",  "tree.c",     "unixsig.c",  "util.c",
             "visual.c",    "windows.c",
         },
-        .flags = nc_cflags,
+        .flags = nc_effective_cflags,
     });
     nc_mod.addCSourceFiles(.{
         .root = nc_dep.path("src/compat"),
         .files = &.{"compat.c"},
-        .flags = nc_cflags,
+        .flags = nc_effective_cflags,
     });
     nc_mod.addIncludePath(nc_dep.path("include"));
     nc_mod.addIncludePath(nc_dep.path("src"));
