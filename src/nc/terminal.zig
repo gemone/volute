@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const Key = @import("../vx/key.zig").Key;
 const nc = @import("bindings.zig");
@@ -8,23 +9,23 @@ const c = nc.c;
 pub const Color = enum { default, red, green, yellow, blue, magenta, cyan, white, gray };
 
 // ── Notcurses style-bit constants ─────────────────────────────────────────────
-pub const STYLE_NONE      = @as(c_uint, c.NCSTYLE_NONE);
-pub const STYLE_BOLD      = @as(c_uint, c.NCSTYLE_BOLD);
-pub const STYLE_ITALIC    = @as(c_uint, c.NCSTYLE_ITALIC);
+pub const STYLE_NONE = @as(c_uint, c.NCSTYLE_NONE);
+pub const STYLE_BOLD = @as(c_uint, c.NCSTYLE_BOLD);
+pub const STYLE_ITALIC = @as(c_uint, c.NCSTYLE_ITALIC);
 pub const STYLE_UNDERLINE = @as(c_uint, c.NCSTYLE_UNDERLINE);
 
 // ── Event types (defined in bindings.zig to avoid circular imports) ────────────────
 pub const MouseEvent = nc.MouseEvent;
-pub const Event      = nc.Event;
+pub const Event = nc.Event;
 
 // ── Terminal ──────────────────────────────────────────────────────────────────
 pub const Terminal = struct {
     const Self = @This();
 
-    nc_ptr:   *c.notcurses,
+    nc_ptr: *c.notcurses,
     stdplane: *c.ncplane,
-    size:     struct { rows: usize, cols: usize },
-    io:       std.Io,
+    size: struct { rows: usize, cols: usize },
+    io: std.Io,
     saved_termios: ?posix.termios,
     /// Consecutive timeouts from notcurses_get; above threshold we start
     /// polling raw stdin as well (SSH fallback).
@@ -34,10 +35,13 @@ pub const Terminal = struct {
         // Save termios BEFORE notcurses touches the terminal so we can
         // restore it on deinit.  notcurses_core_init sets its own raw mode;
         // we must NOT apply our own raw mode on top of it.
-        const saved_termios = posix.tcgetattr(posix.STDIN_FILENO) catch null;
+        const saved_termios = if (builtin.target.os.tag == .windows)
+            null
+        else
+            posix.tcgetattr(posix.STDIN_FILENO) catch null;
 
         var opts: c.notcurses_options = std.mem.zeroes(c.notcurses_options);
-        opts.flags    = c.NCOPTION_SUPPRESS_BANNERS;
+        opts.flags = c.NCOPTION_SUPPRESS_BANNERS;
         opts.loglevel = c.NCLOGLEVEL_SILENT;
         const nc_ptr = c.notcurses_core_init(&opts, null) orelse
             return error.NotcursesInitFailed;
@@ -52,10 +56,10 @@ pub const Terminal = struct {
         // Enable mouse button events (includes scroll wheel BUTTON4/5).
         _ = c.notcurses_mice_enable(nc_ptr, c.NCMICE_BUTTON_EVENT);
         return .{
-            .nc_ptr   = nc_ptr,
+            .nc_ptr = nc_ptr,
             .stdplane = stdplane,
-            .size     = .{ .rows = @intCast(rows), .cols = @intCast(cols) },
-            .io       = io,
+            .size = .{ .rows = @intCast(rows), .cols = @intCast(cols) },
+            .io = io,
             .saved_termios = saved_termios,
             .nc_timeout_count = 0,
         };
@@ -63,8 +67,10 @@ pub const Terminal = struct {
 
     pub fn deinit(self: *Self) void {
         _ = c.notcurses_stop(self.nc_ptr);
-        if (self.saved_termios) |termios_state| {
-            posix.tcsetattr(posix.STDIN_FILENO, .NOW, termios_state) catch {};
+        if (builtin.target.os.tag != .windows) {
+            if (self.saved_termios) |termios_state| {
+                posix.tcsetattr(posix.STDIN_FILENO, .NOW, termios_state) catch {};
+            }
         }
     }
 
@@ -253,16 +259,15 @@ pub const Terminal = struct {
     /// notcurses does not manage cursor shape, so we bypass it here.
     pub fn setCursorStyle(self: *Self, style: CursorStyle) void {
         const seq: []const u8 = switch (style) {
-            .block     => "\x1b[2 q",
+            .block => "\x1b[2 q",
             .underline => "\x1b[4 q",
-            .beam      => "\x1b[6 q",
+            .beam => "\x1b[6 q",
         };
         var buf: [8]u8 = undefined;
         var w = std.Io.File.stdout().writerStreaming(self.io, &buf);
         w.interface.writeAll(seq) catch {};
         w.interface.flush() catch {};
     }
-
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -270,14 +275,14 @@ pub const Terminal = struct {
 fn colorToRgb(color: Color) ?[3]u8 {
     return switch (color) {
         .default => null,
-        .red     => .{ 0xcc, 0x44, 0x44 },
-        .green   => .{ 0x44, 0xaa, 0x44 },
-        .yellow  => .{ 0xcc, 0xaa, 0x44 },
-        .blue    => .{ 0x44, 0x88, 0xcc },
+        .red => .{ 0xcc, 0x44, 0x44 },
+        .green => .{ 0x44, 0xaa, 0x44 },
+        .yellow => .{ 0xcc, 0xaa, 0x44 },
+        .blue => .{ 0x44, 0x88, 0xcc },
         .magenta => .{ 0xbb, 0x55, 0xcc },
-        .cyan    => .{ 0x44, 0xcc, 0xcc },
-        .white   => .{ 0xcc, 0xcc, 0xcc },
-        .gray    => .{ 0x88, 0x88, 0x88 },
+        .cyan => .{ 0x44, 0xcc, 0xcc },
+        .white => .{ 0xcc, 0xcc, 0xcc },
+        .gray => .{ 0x88, 0x88, 0x88 },
     };
 }
 
