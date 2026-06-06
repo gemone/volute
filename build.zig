@@ -288,6 +288,13 @@ pub fn build(b: *std.Build) void {
         "-Wno-unused-function", "-Wno-deprecated-declarations",
     };
 
+    // Optional: path to MSYS2 MinGW64 include dir (Windows CI).
+    // Passed as -Dmsys2-include=C:/msys64/mingw64/include so that only
+    // the notcurses C module sees the MSYS2 headers, avoiding conflicts
+    // with zig's bundled Windows API headers in other modules.
+    const msys2_include = b.option([]const u8, "msys2-include",
+        "MSYS2 MinGW64 include directory (Windows only, for notcurses build)");
+
     const nc_mod = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
     nc_mod.addCSourceFiles(.{
         .root = nc_dep.path("src/lib"),
@@ -317,6 +324,11 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .windows) {
         nc_mod.addCMacro("NOMINMAX", "1");
         nc_mod.addCMacro("WIN32_LEAN_AND_MEAN", "1");
+        // Add MSYS2 headers ONLY for this module so libunistring/ncurses
+        // headers are found without polluting zig's own Windows API headers.
+        if (msys2_include) |p| {
+            nc_mod.addIncludePath(.{ .cwd_relative = p });
+        }
     }
 
     const notcurses_lib = b.addLibrary(.{
