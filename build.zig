@@ -26,9 +26,14 @@ fn linkNotcursesSystemLibs(
             mod.linkSystemLibrary("notcurses", .{});
             mod.linkSystemLibrary("notcurses-core", .{});
         }
+        // Link against import libs expected by the prebuilt notcurses package.
+        mod.linkSystemLibrary("ncursesw6", .{});
+        mod.linkSystemLibrary("tinfow6", .{});
         mod.linkSystemLibrary("unistring", .{});
-        mod.linkSystemLibrary("ncursesw", .{});
+        mod.linkSystemLibrary("deflate", .{});
         mod.linkSystemLibrary("z", .{});
+        mod.linkSystemLibrary("ws2_32", .{});
+        mod.linkSystemLibrary("secur32", .{});
         mod.linkSystemLibrary("ntdll", .{});
         mod.linkSystemLibrary("user32", .{});
     } else if (target.result.os.tag == .macos) {
@@ -261,8 +266,7 @@ pub fn build(b: *std.Build) void {
 
     // ── notcurses (source build on Unix, system package on Windows) ───────────────
     const use_system_notcurses_windows = target.result.os.tag == .windows;
-    const msys2_prefix = b.option([]const u8, "msys2-prefix",
-        "MSYS2 MinGW64 prefix for system notcurses on Windows (default: C:/msys64/mingw64)") orelse
+    const msys2_prefix = b.option([]const u8, "msys2-prefix", "MSYS2 MinGW64 prefix for system notcurses on Windows (default: C:/msys64/mingw64)") orelse
         "C:/msys64/mingw64";
     const msys2_include: std.Build.LazyPath = .{ .cwd_relative = b.fmt("{s}/include", .{msys2_prefix}) };
     const msys2_lib: std.Build.LazyPath = .{ .cwd_relative = b.fmt("{s}/lib", .{msys2_prefix}) };
@@ -297,9 +301,11 @@ pub fn build(b: *std.Build) void {
     );
 
     const nc_cflags = &[_][]const u8{
-        "-std=gnu11",           // sixel.c uses typeof() GNU extension
-        "-D_GNU_SOURCE",        "-D_DEFAULT_SOURCE",
-        "-Wno-unused-function", "-Wno-deprecated-declarations",
+        "-std=gnu11", // sixel.c uses typeof() GNU extension
+        "-D_GNU_SOURCE",
+        "-D_DEFAULT_SOURCE",
+        "-Wno-unused-function",
+        "-Wno-deprecated-declarations",
     };
 
     var notcurses_lib: ?*std.Build.Step.Compile = null;
@@ -308,14 +314,14 @@ pub fn build(b: *std.Build) void {
         nc_mod.addCSourceFiles(.{
             .root = nc_dep.path("src/lib"),
             .files = &.{
-                "automaton.c", "banner.c",   "blit.c",     "debug.c",
-                "direct.c",    "egcpool.c",  "fade.c",     "fd.c",
-                "fill.c",      "gpm.c",      "in.c",       "kitty.c",
-                "layout.c",    "linux.c",    "menu.c",     "metric.c",
-                "mice.c",      "notcurses.c","plot.c",     "progbar.c",
-                "reader.c",    "reel.c",     "render.c",   "selector.c",
-                "sixel.c",     "sprite.c",   "stats.c",    "tabbed.c",
-                "termdesc.c",  "tree.c",     "unixsig.c",  "util.c",
+                "automaton.c", "banner.c",    "blit.c",    "debug.c",
+                "direct.c",    "egcpool.c",   "fade.c",    "fd.c",
+                "fill.c",      "gpm.c",       "in.c",      "kitty.c",
+                "layout.c",    "linux.c",     "menu.c",    "metric.c",
+                "mice.c",      "notcurses.c", "plot.c",    "progbar.c",
+                "reader.c",    "reel.c",      "render.c",  "selector.c",
+                "sixel.c",     "sprite.c",    "stats.c",   "tabbed.c",
+                "termdesc.c",  "tree.c",      "unixsig.c", "util.c",
                 "visual.c",    "windows.c",
             },
             .flags = nc_cflags,
