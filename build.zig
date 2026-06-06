@@ -26,8 +26,6 @@ fn linkNotcursesSystemLibs(
             mod.linkSystemLibrary("notcurses", .{});
             mod.linkSystemLibrary("notcurses-core", .{});
         }
-        // notcurses-core is built against ncurses DLL imports on Windows.
-        mod.linkSystemLibrary("ncursesw", .{ .preferred_link_mode = .dynamic });
         mod.linkSystemLibrary("unistring", .{});
         mod.linkSystemLibrary("deflate", .{});
         mod.linkSystemLibrary("z", .{});
@@ -269,6 +267,7 @@ pub fn build(b: *std.Build) void {
         "C:/msys64/mingw64";
     const msys2_include: std.Build.LazyPath = .{ .cwd_relative = b.fmt("{s}/include", .{msys2_prefix}) };
     const msys2_lib: std.Build.LazyPath = .{ .cwd_relative = b.fmt("{s}/lib", .{msys2_prefix}) };
+    const msys2_ncurses_import: std.Build.LazyPath = .{ .cwd_relative = b.fmt("{s}/lib/libncursesw.dll.a", .{msys2_prefix}) };
 
     const nc_dep = b.dependency("notcurses", .{});
 
@@ -373,6 +372,7 @@ pub fn build(b: *std.Build) void {
     if (notcurses_lib) |lib| root_mod.linkLibrary(lib);
     if (use_system_notcurses_windows) {
         root_mod.addLibraryPath(msys2_lib);
+        root_mod.addObjectFile(msys2_ncurses_import);
     }
     linkNotcursesSystemLibs(root_mod, target, use_system_notcurses_windows);
     if (use_system_notcurses_windows) {
@@ -406,6 +406,7 @@ pub fn build(b: *std.Build) void {
     if (notcurses_lib) |lib| test_mod.linkLibrary(lib);
     if (use_system_notcurses_windows) {
         test_mod.addLibraryPath(msys2_lib);
+        test_mod.addObjectFile(msys2_ncurses_import);
     }
     linkNotcursesSystemLibs(test_mod, target, use_system_notcurses_windows);
     if (use_system_notcurses_windows) {
@@ -480,6 +481,7 @@ pub fn build(b: *std.Build) void {
     if (notcurses_lib) |lib| bench_render_mod.linkLibrary(lib);
     if (use_system_notcurses_windows) {
         bench_render_mod.addLibraryPath(msys2_lib);
+        bench_render_mod.addObjectFile(msys2_ncurses_import);
     }
     linkNotcursesSystemLibs(bench_render_mod, target, use_system_notcurses_windows);
     if (use_system_notcurses_windows) {
