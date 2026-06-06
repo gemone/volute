@@ -60,6 +60,36 @@ zig build run -- path/to/file
 zig build test
 ```
 
+## Terminal compatibility (pure Zig backend)
+
+Volute now uses a pure Zig terminal backend (`src/tui`) and applies capability-based fallbacks by terminal family.
+
+**Phase 1 validated targets**
+
+- kitty
+- wezterm
+- iTerm2
+- Windows Terminal
+- tmux on top of kitty/wezterm/iTerm2
+
+**Behavior notes**
+
+- Interactive TUI mode requires both stdin/stdout to be TTY; otherwise `vx` exits with a clear error.
+- VSCode integrated terminal defaults to non-alt-screen mode for visibility/stability.
+- In tmux/screen, capabilities are intentionally conservative for stability.
+- Unsupported style/color features gracefully downgrade (e.g. truecolor -> 256-color -> 16-color).
+
+**Capability override env vars**
+
+| Variable | Example | Effect |
+| --- | --- | --- |
+| `VX_TUI_COLOR_DEPTH` | `truecolor` / `ansi256` / `ansi16` / `mono` | Force color depth |
+| `VX_TUI_NO_ITALIC` | `1` | Disable italic style emission |
+| `VX_TUI_NO_UNDERLINE` | `1` | Disable underline style emission |
+| `VX_TUI_DISABLE_MOUSE` | `1` | Disable SGR mouse handling |
+| `VX_TUI_DISABLE_CURSOR_SHAPE` | `1` | Disable cursor shape sequence emission |
+| `VX_TUI_FORCE_FOCUS_EVENTS` | `1` | Force-enable focus event capability |
+
 ## Repository layout
 
 | Path | Purpose |

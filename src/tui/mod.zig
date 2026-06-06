@@ -1,4 +1,4 @@
-pub const bindings = @import("bindings.zig");
+pub const capabilities = @import("capabilities.zig");
 pub const Terminal = @import("terminal.zig").Terminal;
 pub const Event = @import("terminal.zig").Event;
 pub const MouseEvent = @import("terminal.zig").MouseEvent;

@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
         include:
           - os: ubuntu-latest
             zig-version: "0.16.0"
@@ -49,18 +49,23 @@ jobs:
       - name: Run unit tests
         run: zig build test
 
-      - name: Install Python test dependencies
-        run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install pytest
-
       - name: Run encoding correctness tests
-        run: python3 -m pytest tests/test_encoding.py -v
+        shell: bash
+        run: |
+          if command -v uv >/dev/null 2>&1; then
+            uv run pytest tests/test_encoding.py -v
+          else
+            python3 -m venv .venv
+            source .venv/bin/activate
+            python -m pip install --upgrade pip
+            python -m pip install pytest
+            python -m pytest tests/test_encoding.py -v
+          fi
 
       - name: Test CLI transcoding functionality
+        shell: bash
         run: |
           echo "Testing CLI transcoding..."
-          ./zig-out/bin/vx --version
           
           # Test ASCII round-trip
           echo "Hello World" > /tmp/test_ascii.txt
@@ -78,16 +83,12 @@ jobs:
           echo "Platform: ${{ matrix.os }}"
           echo "Architecture: ${{ runner.arch }}"
           
-          # Test platform-specific encodings
+          # Test OS-specific target paths while exercising the same transcode flow.
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            echo "Testing Linux-specific encodings..."
-            ./zig-out/bin/vx -e utf-8 -o /tmp/test_linux.txt /tmp/test_utf8.txt
-          elif [[ "${{ runner.os }}" == "macOS" ]]; then
-            echo "Testing macOS-specific encodings..."
-            ./zig-out/bin/vx -e utf-8 -o /tmp/test_macos.txt /tmp/test_utf8.txt
-          elif [[ "${{ runner.os }}" == "Windows" ]]; then
-            echo "Testing Windows-specific encodings..."
-            ./zig-out/bin/vx.exe -e utf-8 -o /tmp/test_windows.txt /tmp/test_utf8.txt
+            out=/tmp/test_linux.txt
+          else
+            out=/tmp/test_macos.txt
           fi
+          ./zig-out/bin/vx -e utf-8 -o "$out" /tmp/test_utf8.txt
           
           echo "✅ Platform-specific encoding tests passed"

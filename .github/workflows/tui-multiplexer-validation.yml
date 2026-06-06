@@ -1,0 +1,130 @@
+name: TUI Multiplexer Validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - refactor/zzz
+      - master
+  workflow_dispatch:
+
+env:
+  ZIG_VERSION: "0.16.0"
+
+jobs:
+  validate-tmux:
+    name: tmux (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install tmux (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Install tmux (macOS)
+        if: runner.os == 'macOS'
+        run: brew install tmux
+
+      - name: Build vx
+        run: zig build
+
+      - name: Run tmux scenario
+        run: bash scripts/ci/tui/validate_tmux.sh ./zig-out/bin/vx ./.tmp/tui-result-${{ runner.os }}
+
+      - name: Upload tmux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tui-result-${{ runner.os }}
+          path: ./.tmp/tui-result-${{ runner.os }}
+
+  validate-pstmux:
+    name: pstmux (windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install pstmux
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          $installed = $false
+          foreach ($name in @("pstmux", "PSTmux", "PsTmux")) {
+            try {
+              Install-Module -Name $name -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+              Import-Module $name -Force -ErrorAction SilentlyContinue
+              $installed = $true
+              Write-Host "Installed module: $name"
+              break
+            } catch {
+              Write-Host "Install failed for ${name}: $($_.Exception.Message)"
+            }
+          }
+          if (-not $installed) {
+            throw "Unable to install pstmux module from PSGallery"
+          }
+          if (-not (Get-Command pstmux -ErrorAction SilentlyContinue)) {
+            throw "pstmux command not found after module install"
+          }
+          pstmux --version
+
+      - name: Build vx
+        run: zig build
+
+      - name: Run pstmux scenario
+        shell: pwsh
+        run: ./scripts/ci/tui/validate_pstmux.ps1 -BinaryPath .\zig-out\bin\vx.exe -ArtifactDir .\.tmp\tui-result-Windows
+
+      - name: Upload pstmux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tui-result-Windows
+          path: ./.tmp/tui-result-Windows
+
+  compare-results:
+    name: Compare final outputs
+    runs-on: ubuntu-latest
+    needs: [validate-tmux, validate-pstmux]
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./tui-results
+
+      - name: Verify all OS outputs are identical
+        run: |
+          python3 - <<'PY'
+          import pathlib
+
+          root = pathlib.Path("tui-results")
+          finals = list(root.glob("**/final.txt"))
+          if len(finals) < 3:
+              raise SystemExit(f"expected at least 3 final.txt files, got {len(finals)}")
+
+          contents = {p.parent.name: p.read_text(encoding="utf-8").replace("\r\n", "\n") for p in finals}
+          unique = set(contents.values())
+          if len(unique) != 1:
+              print("Final outputs differ by platform:")
+              for name, text in contents.items():
+                  print(f"--- {name} ---")
+                  print(text)
+              raise SystemExit(1)
+
+          print("All platform outputs are identical.")
+          PY

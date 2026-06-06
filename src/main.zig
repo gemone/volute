@@ -277,7 +277,8 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
 
-    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
+    var args_iter = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer args_iter.deinit();
     _ = args_iter.next(); // skip argv[0]
 
     const args = parseArgs(allocator, io, &args_iter) catch |err| switch (err) {
@@ -310,6 +311,15 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // ── TUI mode ──────────────────────────────────────────────────────────────
+    if (!terminal.hasInteractiveTty()) {
+        stderrPrint(
+            io,
+            "vx: interactive TUI requires a real terminal (stdin/stdout must be TTY)\n",
+            .{},
+        ) catch {};
+        std.process.exit(1);
+    }
+
     var editor = try Editor.init(allocator, io);
     defer editor.deinit();
 

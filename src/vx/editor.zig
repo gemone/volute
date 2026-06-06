@@ -179,7 +179,6 @@ pub const Editor = struct {
             .which_key_prefix = "",
             .key_trie_root = keymap.normalKeymap(),
 
-
             .status_msg = null,
             .command_buf = .empty,
             .in_command_mode = false,
@@ -382,121 +381,117 @@ pub const Editor = struct {
         try buildCheatsheetSections(self.allocator, buf_ptr);
     }
 
-/// Build cheatsheet content in single-column stacked layout.
-fn buildCheatsheetSections(gpa: std.mem.Allocator, buf: *Buffer) !void {
-    const root = keymap.normalKeymap();
-    const normal_node = switch (root) {
-        .node => |n| n,
-        else => return,
-    };
+    /// Build cheatsheet content in single-column stacked layout.
+    fn buildCheatsheetSections(gpa: std.mem.Allocator, buf: *Buffer) !void {
+        const root = keymap.normalKeymap();
+        const normal_node = switch (root) {
+            .node => |n| n,
+            else => return,
+        };
 
-    const max_lines: usize = 32;
-    const Cat = enum(u8) { movement, insert, editing, find, case_, sel, search, indent, jump, other };
-    const cat_titles = [_][]const u8{ "Movement", "Insert Modes", "Editing", "Find / Replace", "Case", "Selection", "Search", "Indent / Format", "Page / Jump", "Other" };
+        const max_lines: usize = 32;
+        const Cat = enum(u8) { movement, insert, editing, find, case_, sel, search, indent, jump, other };
+        const cat_titles = [_][]const u8{ "Movement", "Insert Modes", "Editing", "Find / Replace", "Case", "Selection", "Search", "Indent / Format", "Page / Jump", "Other" };
 
-    var sections: [12]struct {
-        title: []const u8,
-        lines: [max_lines][]const u8,
-        count: usize,
-    } = undefined;
-    var sec_count: usize = 0;
+        var sections: [12]struct {
+            title: []const u8,
+            lines: [max_lines][]const u8,
+            count: usize,
+        } = undefined;
+        var sec_count: usize = 0;
 
-    // Init category sections (0-9)
-    for (cat_titles, 0..) |title, i| {
-        sections[i].title = title;
-        sections[i].count = 0;
-        sec_count += 1;
-    }
-
-    // Collect prefix nodes
-    var prefix_titles: [6][]const u8 = undefined;
-    var prefix_lines: [6][max_lines][]const u8 = undefined;
-    var prefix_counts: [6]usize = [_]usize{0} ** 6;
-    var prefix_count: usize = 0;
-
-    for (normal_node.bindings) |binding| {
-        switch (binding.trie) {
-            .leaf => |cmd| {
-                if (binding.desc.len == 0) continue;
-                const cat: ?Cat = switch (cmd) {
-                    .move_char_left, .move_char_right, .move_visual_line_up, .move_visual_line_down,
-                    .move_line_up, .move_line_down, .move_next_word_start, .move_prev_word_start,
-                    .move_next_word_end, .move_next_long_word_start, .move_prev_long_word_start,
-                    .move_next_long_word_end, .goto_line_start, .goto_line_end => .movement,
-                    .insert_mode, .insert_at_line_start, .insert_at_line_end, .append_mode,
-                    .open_below_with_indent, .open_above_with_indent => .insert,
-                    .delete_current_line, .delete_selection, .delete_selection_noyank,
-                    .change_current_line, .change_selection_noyank, .yank_current_line,
-                    .paste_after, .paste_before, .undo, .redo => .editing,
-                    .find_till_char, .find_next_char, .till_prev_char, .find_prev_char,
-                    .repeat_last_motion, .replace, .replace_with_yanked => .find,
-                    .switch_case, .switch_to_lowercase, .switch_to_uppercase => .case_,
-                    .select_mode, .extend_line_below, .extend_to_line_bounds, .select_all,
-                    .collapse_selection, .flip_selections, .copy_selection_on_next_line,
-                    .copy_selection_on_prev_line, .match_brackets, .join_selections => .sel,
-                    .search, .rsearch, .search_next, .search_prev => .search,
-                    .indent, .unindent, .format_selections => .indent,
-                    .page_up, .page_down, .page_cursor_half_up, .page_cursor_half_down,
-                    .jump_back, .jump_forward, .save => .jump,
-                    else => .other,
-                };
-                const si = @intFromEnum(cat.?);
-                if (sections[si].count >= max_lines) continue;
-                var kbuf: [16]u8 = undefined;
-                const kl = binding.key.format(&kbuf);
-                sections[si].lines[sections[si].count] = try std.fmt.allocPrint(gpa, "  {s:8}  {s}", .{ kl, binding.desc });
-                sections[si].count += 1;
-            },
-            .node => |child| {
-                if (child.name.len == 0 or prefix_count >= prefix_titles.len) continue;
-                var pbuf: [16]u8 = undefined;
-                const pl = binding.key.format(&pbuf);
-                prefix_titles[prefix_count] = try std.fmt.allocPrint(gpa, "{s} ({s})", .{ child.name, pl });
-                for (child.bindings) |sub| {
-                    if (sub.desc.len == 0 or prefix_counts[prefix_count] >= max_lines) continue;
-                    var sbuf: [16]u8 = undefined;
-                    const sl = sub.key.format(&sbuf);
-                    prefix_lines[prefix_count][prefix_counts[prefix_count]] = try std.fmt.allocPrint(gpa, "  {s:3}  {s}", .{ sl, sub.desc });
-                    prefix_counts[prefix_count] += 1;
-                }
-                prefix_count += 1;
-            },
+        // Init category sections (0-9)
+        for (cat_titles, 0..) |title, i| {
+            sections[i].title = title;
+            sections[i].count = 0;
+            sec_count += 1;
         }
-    }
 
-    // Write sections to buffer — single column, stacked vertically
-    // Free each string immediately after writing to avoid leak on error
-    var row: usize = 0;
-    for (&sections) |*sec| {
-        if (sec.count == 0) continue;
-        if (row > 0) { try buf.insertLine(row, ""); row += 1; }
-        const header = try std.fmt.allocPrint(gpa, "═══ {s} ═══", .{sec.title});
-        defer gpa.free(header);
-        try buf.insertLine(row, header);
-        row += 1;
-        for (sec.lines[0..sec.count]) |line| {
-            try buf.insertLine(row, line);
-            gpa.free(line);
+        // Collect prefix nodes
+        var prefix_titles: [6][]const u8 = undefined;
+        var prefix_lines: [6][max_lines][]const u8 = undefined;
+        var prefix_counts: [6]usize = [_]usize{0} ** 6;
+        var prefix_count: usize = 0;
+
+        for (normal_node.bindings) |binding| {
+            switch (binding.trie) {
+                .leaf => |cmd| {
+                    if (binding.desc.len == 0) continue;
+                    const cat: ?Cat = switch (cmd) {
+                        .move_char_left, .move_char_right, .move_visual_line_up, .move_visual_line_down, .move_line_up, .move_line_down, .move_next_word_start, .move_prev_word_start, .move_next_word_end, .move_next_long_word_start, .move_prev_long_word_start, .move_next_long_word_end, .goto_line_start, .goto_line_end => .movement,
+                        .insert_mode, .insert_at_line_start, .insert_at_line_end, .append_mode, .open_below_with_indent, .open_above_with_indent => .insert,
+                        .delete_current_line, .delete_selection, .delete_selection_noyank, .change_current_line, .change_selection_noyank, .yank_current_line, .paste_after, .paste_before, .undo, .redo => .editing,
+                        .find_till_char, .find_next_char, .till_prev_char, .find_prev_char, .repeat_last_motion, .replace, .replace_with_yanked => .find,
+                        .switch_case, .switch_to_lowercase, .switch_to_uppercase => .case_,
+                        .select_mode, .extend_line_below, .extend_to_line_bounds, .select_all, .collapse_selection, .flip_selections, .copy_selection_on_next_line, .copy_selection_on_prev_line, .match_brackets, .join_selections => .sel,
+                        .search, .rsearch, .search_next, .search_prev => .search,
+                        .indent, .unindent, .format_selections => .indent,
+                        .page_up, .page_down, .page_cursor_half_up, .page_cursor_half_down, .jump_back, .jump_forward, .save => .jump,
+                        else => .other,
+                    };
+                    const si = @intFromEnum(cat.?);
+                    if (sections[si].count >= max_lines) continue;
+                    var kbuf: [16]u8 = undefined;
+                    const kl = binding.key.format(&kbuf);
+                    sections[si].lines[sections[si].count] = try std.fmt.allocPrint(gpa, "  {s:8}  {s}", .{ kl, binding.desc });
+                    sections[si].count += 1;
+                },
+                .node => |child| {
+                    if (child.name.len == 0 or prefix_count >= prefix_titles.len) continue;
+                    var pbuf: [16]u8 = undefined;
+                    const pl = binding.key.format(&pbuf);
+                    prefix_titles[prefix_count] = try std.fmt.allocPrint(gpa, "{s} ({s})", .{ child.name, pl });
+                    for (child.bindings) |sub| {
+                        if (sub.desc.len == 0 or prefix_counts[prefix_count] >= max_lines) continue;
+                        var sbuf: [16]u8 = undefined;
+                        const sl = sub.key.format(&sbuf);
+                        prefix_lines[prefix_count][prefix_counts[prefix_count]] = try std.fmt.allocPrint(gpa, "  {s:3}  {s}", .{ sl, sub.desc });
+                        prefix_counts[prefix_count] += 1;
+                    }
+                    prefix_count += 1;
+                },
+            }
+        }
+
+        // Write sections to buffer — single column, stacked vertically
+        // Free each string immediately after writing to avoid leak on error
+        var row: usize = 0;
+        for (&sections) |*sec| {
+            if (sec.count == 0) continue;
+            if (row > 0) {
+                try buf.insertLine(row, "");
+                row += 1;
+            }
+            const header = try std.fmt.allocPrint(gpa, "═══ {s} ═══", .{sec.title});
+            defer gpa.free(header);
+            try buf.insertLine(row, header);
             row += 1;
+            for (sec.lines[0..sec.count]) |line| {
+                try buf.insertLine(row, line);
+                gpa.free(line);
+                row += 1;
+            }
+            sec.count = 0; // Mark as freed
         }
-        sec.count = 0; // Mark as freed
-    }
-    for (0..prefix_count) |pi| {
-        if (prefix_counts[pi] == 0) continue;
-        if (row > 0) { try buf.insertLine(row, ""); row += 1; }
-        const header = try std.fmt.allocPrint(gpa, "═══ {s} ═══", .{prefix_titles[pi]});
-        defer gpa.free(header);
-        try buf.insertLine(row, header);
-        row += 1;
-        for (prefix_lines[pi][0..prefix_counts[pi]]) |line| {
-            try buf.insertLine(row, line);
-            gpa.free(line);
+        for (0..prefix_count) |pi| {
+            if (prefix_counts[pi] == 0) continue;
+            if (row > 0) {
+                try buf.insertLine(row, "");
+                row += 1;
+            }
+            const header = try std.fmt.allocPrint(gpa, "═══ {s} ═══", .{prefix_titles[pi]});
+            defer gpa.free(header);
+            try buf.insertLine(row, header);
             row += 1;
+            for (prefix_lines[pi][0..prefix_counts[pi]]) |line| {
+                try buf.insertLine(row, line);
+                gpa.free(line);
+                row += 1;
+            }
+            gpa.free(prefix_titles[pi]);
+            prefix_counts[pi] = 0; // Mark as freed
         }
-        gpa.free(prefix_titles[pi]);
-        prefix_counts[pi] = 0; // Mark as freed
     }
-}
     pub fn focusedFloat(self: *Self) ?*FloatBuf {
         var i = self.float_bufs.items.len;
         while (i > 0) {
@@ -945,7 +940,7 @@ fn buildCheatsheetSections(gpa: std.mem.Allocator, buf: *Buffer) !void {
             .surround_add => try self.applySurroundAdd(key.char() orelse return),
             .surround_replace => try self.applySurroundReplace(key.char() orelse return),
             .replace => {
-                var ascii_buf: [1]u8 = undefined;
+                var ascii_buf: [4]u8 = undefined;
                 const target = keyInputBytes(key, &ascii_buf);
                 if (target.len == 0) return;
                 try self.replaceSelectionWithBytes(target);
@@ -2496,8 +2491,7 @@ fn buildCheatsheetSections(gpa: std.mem.Allocator, buf: *Buffer) !void {
                 if (self.buffers.items.len > 1) {
                     win.buf_index = if (cmd == .buffer_next)
                         (win.buf_index + 1) % self.buffers.items.len
-                    else if (win.buf_index > 0) win.buf_index - 1
-                    else self.buffers.items.len - 1;
+                    else if (win.buf_index > 0) win.buf_index - 1 else self.buffers.items.len - 1;
                     win.resetView();
                 }
             },
@@ -2811,9 +2805,12 @@ fn insertTextAsLines(buf: *Buffer, start_row: usize, text: []const u8) !void {
     }
 }
 
-fn keyInputBytes(key: Key, ascii_buf: *[1]u8) []const u8 {
+fn keyInputBytes(key: Key, ascii_buf: *[4]u8) []const u8 {
     const utf8_bytes = key.getBytes();
-    if (utf8_bytes.len > 0) return utf8_bytes;
+    if (utf8_bytes.len > 0) {
+        @memcpy(ascii_buf[0..utf8_bytes.len], utf8_bytes);
+        return ascii_buf[0..utf8_bytes.len];
+    }
     if (key.char()) |ch| {
         ascii_buf[0] = ch;
         return ascii_buf[0..1];
