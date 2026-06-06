@@ -284,7 +284,9 @@ pub fn build(b: *std.Build) void {
     _ = nc_gen.add("compat/compat.h",
         \\#pragma once
         \\#ifdef __MINGW32__
-        \\#include <windows.h>
+        \\#include <minwindef.h>
+        \\#include <basetsd.h>
+        \\#include <winnt.h>
         \\#endif
         \\#include_next "compat/compat.h"
     );
