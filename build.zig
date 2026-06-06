@@ -265,6 +265,7 @@ pub fn build(b: *std.Build) void {
         "MSYS2 MinGW64 prefix for system notcurses on Windows (default: C:/msys64/mingw64)") orelse
         "C:/msys64/mingw64";
     const msys2_include: std.Build.LazyPath = .{ .cwd_relative = b.fmt("{s}/include", .{msys2_prefix}) };
+    const msys2_lib: std.Build.LazyPath = .{ .cwd_relative = b.fmt("{s}/lib", .{msys2_prefix}) };
 
     const nc_dep = b.dependency("notcurses", .{});
 
@@ -365,6 +366,9 @@ pub fn build(b: *std.Build) void {
     root_mod.addImport("languages", languages_mod);
     root_mod.addImport("pcre2", pcre2_mod);
     if (notcurses_lib) |lib| root_mod.linkLibrary(lib);
+    if (use_system_notcurses_windows) {
+        root_mod.addLibraryPath(msys2_lib);
+    }
     linkNotcursesSystemLibs(root_mod, target, use_system_notcurses_windows);
     if (use_system_notcurses_windows) {
         root_mod.addIncludePath(msys2_include);
@@ -395,6 +399,9 @@ pub fn build(b: *std.Build) void {
     test_mod.addImport("languages", languages_mod);
     test_mod.addImport("pcre2", pcre2_mod);
     if (notcurses_lib) |lib| test_mod.linkLibrary(lib);
+    if (use_system_notcurses_windows) {
+        test_mod.addLibraryPath(msys2_lib);
+    }
     linkNotcursesSystemLibs(test_mod, target, use_system_notcurses_windows);
     if (use_system_notcurses_windows) {
         test_mod.addIncludePath(msys2_include);
@@ -466,6 +473,9 @@ pub fn build(b: *std.Build) void {
     bench_render_mod.addImport("pcre2", bench_pcre2_mod);
     bench_render_mod.addImport("languages", bench_languages_mod);
     if (notcurses_lib) |lib| bench_render_mod.linkLibrary(lib);
+    if (use_system_notcurses_windows) {
+        bench_render_mod.addLibraryPath(msys2_lib);
+    }
     linkNotcursesSystemLibs(bench_render_mod, target, use_system_notcurses_windows);
     if (use_system_notcurses_windows) {
         bench_render_mod.addIncludePath(msys2_include);
