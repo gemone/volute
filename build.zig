@@ -300,11 +300,15 @@ pub fn build(b: *std.Build) void {
         nc_mod.addCMacro("WIN32_LEAN_AND_MEAN", "1");
         nc_mod.linkSystemLibrary("ntdll", .{});
         nc_mod.linkSystemLibrary("user32", .{});
+    } else if (target.result.os.tag == .macos) {
+        nc_mod.linkSystemLibrary("ncurses", .{});
+        nc_mod.linkSystemLibrary("unistring", .{});
+        nc_mod.linkSystemLibrary("z", .{});
     } else {
         nc_mod.linkSystemLibrary("tinfo", .{});
         nc_mod.linkSystemLibrary("unistring", .{});
+        nc_mod.linkSystemLibrary("z", .{});
     }
-    nc_mod.linkSystemLibrary("z", .{});
 
     const notcurses_lib = b.addLibrary(.{
         .name = "notcurses",

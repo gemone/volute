@@ -33,6 +33,18 @@ jobs:
         with:
           version: "0.16.0"
 
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libunistring-dev zlib1g-dev libncurses-dev
+
+      - name: Install macOS native dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install ncurses libunistring zlib
+          echo "LIBRARY_PATH=/opt/homebrew/lib:/usr/local/lib:${LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "CPATH=/opt/homebrew/include:/usr/local/include:${CPATH}" >> "$GITHUB_ENV"
+
       - name: Cache Zig dependencies
         uses: actions/cache@v5
         with:
@@ -51,14 +63,22 @@ jobs:
         run: zig build test
 
       - name: Install pytest
-        run: pip install pytest
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
 
       - name: Run encoding correctness tests
-        run: python3 -m pytest tests/test_encoding.py -v
+        run: python -m pytest tests/test_encoding.py -v
 
       - name: Test CLI transcoding
+        shell: bash
         run: |
-          ./zig-out/bin/vx --version
-          echo "Hello World" > /tmp/test.txt
-          ./zig-out/bin/vx -e utf-8 -o /tmp/out.txt /tmp/test.txt
+          VX_BIN=./zig-out/bin/vx
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            VX_BIN=./zig-out/bin/vx.exe
+          fi
+          TMP_DIR="$(mktemp -d)"
+          "$VX_BIN" --version
+          echo "Hello World" > "$TMP_DIR/test.txt"
+          "$VX_BIN" -e utf-8 -o "$TMP_DIR/out.txt" "$TMP_DIR/test.txt"
           echo "✅ Encoding tests passed on ${{ matrix.os }}"

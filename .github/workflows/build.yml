@@ -27,6 +27,9 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y libunistring-dev zlib1g-dev libncurses-dev
+
       - name: Cache Zig dependencies
         uses: actions/cache@v5
         with:
@@ -58,6 +61,18 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libunistring-dev zlib1g-dev libncurses-dev
+
+      - name: Install macOS native dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install ncurses libunistring zlib
+          echo "LIBRARY_PATH=/opt/homebrew/lib:/usr/local/lib:${LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "CPATH=/opt/homebrew/include:/usr/local/include:${CPATH}" >> "$GITHUB_ENV"
+
       - name: Cache Zig dependencies
         uses: actions/cache@v5
         with:
@@ -77,6 +92,7 @@ jobs:
         run: zig build test
 
       - name: Run encoding validation tests
+        shell: bash
         run: |
           if command -v uv &> /dev/null; then
             uv run pytest tests/test_encoding.py -v
@@ -99,6 +115,9 @@ jobs:
         uses: goto-bus-stop/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
+
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y libunistring-dev zlib1g-dev libncurses-dev
 
       - name: Cache Zig dependencies
         uses: actions/cache@v5

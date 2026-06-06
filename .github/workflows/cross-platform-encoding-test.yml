@@ -32,6 +32,18 @@ jobs:
         with:
           version: ${{ matrix.zig-version }}
 
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libunistring-dev zlib1g-dev libncurses-dev
+
+      - name: Install macOS native dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install ncurses libunistring zlib
+          echo "LIBRARY_PATH=/opt/homebrew/lib:/usr/local/lib:${LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "CPATH=/opt/homebrew/include:/usr/local/include:${CPATH}" >> "$GITHUB_ENV"
+
       - name: Cache Zig dependencies
         uses: actions/cache@v5
         with:
@@ -51,24 +63,30 @@ jobs:
 
       - name: Install Python test dependencies
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install pytest
+          python -m pip install --upgrade pip
+          python -m pip install pytest
 
       - name: Run encoding correctness tests
-        run: python3 -m pytest tests/test_encoding.py -v
+        run: python -m pytest tests/test_encoding.py -v
 
       - name: Test CLI transcoding functionality
+        shell: bash
         run: |
           echo "Testing CLI transcoding..."
-          ./zig-out/bin/vx --version
+          VX_BIN=./zig-out/bin/vx
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            VX_BIN=./zig-out/bin/vx.exe
+          fi
+          TMP_DIR="$(mktemp -d)"
+          "$VX_BIN" --version
           
           # Test ASCII round-trip
-          echo "Hello World" > /tmp/test_ascii.txt
-          ./zig-out/bin/vx -e ascii -o /tmp/test_output_ascii.txt /tmp/test_ascii.txt
+          echo "Hello World" > "$TMP_DIR/test_ascii.txt"
+          "$VX_BIN" -e ascii -o "$TMP_DIR/test_output_ascii.txt" "$TMP_DIR/test_ascii.txt"
           
           # Test UTF-8 round-trip
-          echo "测试中文" > /tmp/test_utf8.txt
-          ./zig-out/bin/vx -e utf-8 -o /tmp/test_output_utf8.txt /tmp/test_utf8.txt
+          echo "测试中文" > "$TMP_DIR/test_utf8.txt"
+          "$VX_BIN" -e utf-8 -o "$TMP_DIR/test_output_utf8.txt" "$TMP_DIR/test_utf8.txt"
           
           echo "✅ CLI transcoding tests passed on ${{ matrix.os }}"
 
@@ -81,13 +99,13 @@ jobs:
           # Test platform-specific encodings
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             echo "Testing Linux-specific encodings..."
-            ./zig-out/bin/vx -e utf-8 -o /tmp/test_linux.txt /tmp/test_utf8.txt
+            ./zig-out/bin/vx -e utf-8 -o "$TMP_DIR/test_linux.txt" "$TMP_DIR/test_utf8.txt"
           elif [[ "${{ runner.os }}" == "macOS" ]]; then
             echo "Testing macOS-specific encodings..."
-            ./zig-out/bin/vx -e utf-8 -o /tmp/test_macos.txt /tmp/test_utf8.txt
+            ./zig-out/bin/vx -e utf-8 -o "$TMP_DIR/test_macos.txt" "$TMP_DIR/test_utf8.txt"
           elif [[ "${{ runner.os }}" == "Windows" ]]; then
             echo "Testing Windows-specific encodings..."
-            ./zig-out/bin/vx.exe -e utf-8 -o /tmp/test_windows.txt /tmp/test_utf8.txt
+            ./zig-out/bin/vx.exe -e utf-8 -o "$TMP_DIR/test_windows.txt" "$TMP_DIR/test_utf8.txt"
           fi
           
           echo "✅ Platform-specific encoding tests passed"
