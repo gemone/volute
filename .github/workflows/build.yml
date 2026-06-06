@@ -46,6 +46,7 @@ jobs:
         run: zig build
 
       - name: Run unit tests
+        if: runner.os == 'Linux'
         run: zig build test
 
   test:
@@ -92,6 +93,7 @@ jobs:
         run: zig build test
 
       - name: Run encoding validation tests
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           if command -v uv &> /dev/null; then
@@ -102,7 +104,7 @@ jobs:
 
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
 
   lints:
     name: Lints

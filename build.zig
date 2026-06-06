@@ -15,6 +15,21 @@ fn addCodecImports(
     }
 }
 
+fn linkNotcursesSystemLibs(mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    if (target.result.os.tag == .windows) {
+        mod.linkSystemLibrary("ntdll", .{});
+        mod.linkSystemLibrary("user32", .{});
+    } else if (target.result.os.tag == .macos) {
+        mod.linkSystemLibrary("ncurses", .{});
+        mod.linkSystemLibrary("unistring", .{});
+        mod.linkSystemLibrary("z", .{});
+    } else {
+        mod.linkSystemLibrary("tinfo", .{});
+        mod.linkSystemLibrary("unistring", .{});
+        mod.linkSystemLibrary("z", .{});
+    }
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -294,20 +309,10 @@ pub fn build(b: *std.Build) void {
     nc_mod.addIncludePath(nc_dep.path("src"));
     nc_mod.addIncludePath(nc_dep.path("src/lib"));
     nc_mod.addIncludePath(nc_gen.getDirectory());
-    // Platform-specific system libraries for notcurses.
+    // Platform-specific compile settings for notcurses sources.
     if (target.result.os.tag == .windows) {
         nc_mod.addCMacro("NOMINMAX", "1");
         nc_mod.addCMacro("WIN32_LEAN_AND_MEAN", "1");
-        nc_mod.linkSystemLibrary("ntdll", .{});
-        nc_mod.linkSystemLibrary("user32", .{});
-    } else if (target.result.os.tag == .macos) {
-        nc_mod.linkSystemLibrary("ncurses", .{});
-        nc_mod.linkSystemLibrary("unistring", .{});
-        nc_mod.linkSystemLibrary("z", .{});
-    } else {
-        nc_mod.linkSystemLibrary("tinfo", .{});
-        nc_mod.linkSystemLibrary("unistring", .{});
-        nc_mod.linkSystemLibrary("z", .{});
     }
 
     const notcurses_lib = b.addLibrary(.{
@@ -341,6 +346,7 @@ pub fn build(b: *std.Build) void {
     root_mod.addImport("languages", languages_mod);
     root_mod.addImport("pcre2", pcre2_mod);
     root_mod.linkLibrary(notcurses_lib);
+    linkNotcursesSystemLibs(root_mod, target);
     root_mod.addIncludePath(nc_dep.path("include"));
     root_mod.addImport("notcurses_c", nc_c_mod);
 
@@ -366,6 +372,7 @@ pub fn build(b: *std.Build) void {
     test_mod.addImport("languages", languages_mod);
     test_mod.addImport("pcre2", pcre2_mod);
     test_mod.linkLibrary(notcurses_lib);
+    linkNotcursesSystemLibs(test_mod, target);
     test_mod.addIncludePath(nc_dep.path("include"));
     test_mod.addImport("notcurses_c", nc_c_mod);
 
@@ -432,6 +439,7 @@ pub fn build(b: *std.Build) void {
     bench_render_mod.addImport("pcre2", bench_pcre2_mod);
     bench_render_mod.addImport("languages", bench_languages_mod);
     bench_render_mod.linkLibrary(notcurses_lib);
+    linkNotcursesSystemLibs(bench_render_mod, target);
     bench_render_mod.addIncludePath(nc_dep.path("include"));
     bench_render_mod.addImport("notcurses_c", nc_c_mod);
     addCodecImports(b, bench_render_mod, codecs, codec_zigs);
