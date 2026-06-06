@@ -73,7 +73,7 @@ jobs:
               Write-Host "Installed module: $name"
               break
             } catch {
-              Write-Host "Install failed for $name: $($_.Exception.Message)"
+              Write-Host "Install failed for ${name}: $($_.Exception.Message)"
             }
           }
           if (-not $installed) {

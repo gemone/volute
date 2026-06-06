@@ -68,7 +68,8 @@ pub fn main(init: std.process.Init) !void {
     var codecs_opt: []const u8 = "all";
     var no_fetch = false;
 
-    var iter = std.process.Args.Iterator.init(init.minimal.args);
+    var iter = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer iter.deinit();
     _ = iter.skip(); // argv[0]
     while (iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "--codecs")) {

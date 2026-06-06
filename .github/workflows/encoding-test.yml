@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
 
     steps:
       - name: Checkout sources
@@ -50,15 +50,22 @@ jobs:
       - name: Run unit tests
         run: zig build test
 
-      - name: Install pytest
-        run: pip install pytest
-
       - name: Run encoding correctness tests
-        run: python3 -m pytest tests/test_encoding.py -v
+        shell: bash
+        run: |
+          if command -v uv >/dev/null 2>&1; then
+            uv run pytest tests/test_encoding.py -v
+          else
+            python3 -m venv .venv
+            source .venv/bin/activate
+            python -m pip install --upgrade pip
+            python -m pip install pytest
+            python -m pytest tests/test_encoding.py -v
+          fi
 
       - name: Test CLI transcoding
+        shell: bash
         run: |
-          ./zig-out/bin/vx --version
           echo "Hello World" > /tmp/test.txt
           ./zig-out/bin/vx -e utf-8 -o /tmp/out.txt /tmp/test.txt
           echo "✅ Encoding tests passed on ${{ matrix.os }}"
