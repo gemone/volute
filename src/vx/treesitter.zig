@@ -1,7 +1,25 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const ts = @import("tree-sitter");
 const gops = @import("languages").grammar_ops;
 const buffer_mod = @import("buffer.zig");
+
+const UnsupportedDynLib = struct {
+    pub fn open(_: []const u8) error{UnsupportedPlatform}!UnsupportedDynLib {
+        return error.UnsupportedPlatform;
+    }
+
+    pub fn close(_: *UnsupportedDynLib) void {}
+
+    pub fn lookup(_: *UnsupportedDynLib, comptime T: type, _: [:0]const u8) ?T {
+        return null;
+    }
+};
+
+const DynLib = if (builtin.target.os.tag == .windows and builtin.target.abi == .gnu)
+    UnsupportedDynLib
+else
+    std.DynLib;
 
 /// All tree-sitter query files for a single language.
 /// Each field is null when the corresponding .scm file is absent.
@@ -35,7 +53,7 @@ const CaptureMeta = struct {
 /// A loaded tree-sitter language with all available SCM queries.
 /// Owns the dynamic library handle — must call `deinit` to release.
 pub const GrammarHandle = struct {
-    lib: std.DynLib,
+    lib: DynLib,
     language: *const ts.Language,
     queries: Queries,
     /// Reusable parser — created once per grammar load, reused across highlight() calls.
@@ -96,7 +114,7 @@ pub fn loadGrammar(io: std.Io, allocator: std.mem.Allocator, paths: GrammarPaths
     const lib_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ paths.lib_dir, lib_filename });
     defer allocator.free(lib_path);
 
-    var lib = try std.DynLib.open(lib_path);
+    var lib = try DynLib.open(lib_path);
     errdefer lib.close();
 
     const sym_name = try std.fmt.allocPrint(allocator, "tree_sitter_{s}", .{name});
@@ -109,12 +127,12 @@ pub fn loadGrammar(io: std.Io, allocator: std.mem.Allocator, paths: GrammarPaths
     const language = lang_fn();
 
     const queries = Queries{
-        .highlights  = loadQuery(io, allocator, paths.query_dir, name, "highlights.scm",  language),
-        .injections  = loadQuery(io, allocator, paths.query_dir, name, "injections.scm",  language),
-        .locals      = loadQuery(io, allocator, paths.query_dir, name, "locals.scm",      language),
-        .indents     = loadQuery(io, allocator, paths.query_dir, name, "indents.scm",     language),
+        .highlights = loadQuery(io, allocator, paths.query_dir, name, "highlights.scm", language),
+        .injections = loadQuery(io, allocator, paths.query_dir, name, "injections.scm", language),
+        .locals = loadQuery(io, allocator, paths.query_dir, name, "locals.scm", language),
+        .indents = loadQuery(io, allocator, paths.query_dir, name, "indents.scm", language),
         .textobjects = loadQuery(io, allocator, paths.query_dir, name, "textobjects.scm", language),
-        .tags        = loadQuery(io, allocator, paths.query_dir, name, "tags.scm",        language),
+        .tags = loadQuery(io, allocator, paths.query_dir, name, "tags.scm", language),
     };
 
     const parser = ts.Parser.create();
@@ -282,7 +300,10 @@ fn satisfiesPredicates(query: *const ts.Query, match: ts.Query.Match, source: []
             for (args[1..]) |arg| {
                 if (arg.type != .string) continue;
                 const val = query.stringValueForId(arg.value_id) orelse continue;
-                if (std.mem.eql(u8, text, val)) { found = true; break; }
+                if (std.mem.eql(u8, text, val)) {
+                    found = true;
+                    break;
+                }
             }
             if (found == negate) return false;
         } else if (std.mem.eql(u8, base, "match?")) {
@@ -531,4 +552,3 @@ test "highlight: keyword and string styles in Zig source" {
         try std.testing.expectEqual(TokenStyle.number, s);
     }
 }
-
