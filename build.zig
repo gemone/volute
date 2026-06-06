@@ -15,9 +15,17 @@ fn addCodecImports(
     }
 }
 
-fn linkNotcursesSystemLibs(mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+fn linkNotcursesSystemLibs(
+    mod: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    use_system_notcurses_windows: bool,
+) void {
     if (target.result.os.tag == .windows) {
-        // MinGW64 (MSYS2) packages: mingw-w64-x86_64-libunistring, mingw-w64-x86_64-ncurses
+        // MinGW64 (MSYS2) packages.
+        if (use_system_notcurses_windows) {
+            mod.linkSystemLibrary("notcurses", .{});
+            mod.linkSystemLibrary("notcurses-core", .{});
+        }
         mod.linkSystemLibrary("unistring", .{});
         mod.linkSystemLibrary("ncursesw", .{});
         mod.linkSystemLibrary("z", .{});
@@ -251,7 +259,12 @@ pub fn build(b: *std.Build) void {
     });
     pcre2_mod.linkLibrary(pcre2_lib);
 
-    // ── notcurses (compiled from source, no system install needed) ────────────────
+    // ── notcurses (source build on Unix, system package on Windows) ───────────────
+    const use_system_notcurses_windows = target.result.os.tag == .windows;
+    const msys2_prefix = b.option([]const u8, "msys2-prefix",
+        "MSYS2 MinGW64 prefix for system notcurses on Windows (default: C:/msys64/mingw64)") orelse
+        "C:/msys64/mingw64";
+    const msys2_include: std.Build.LazyPath = .{ .cwd_relative = b.fmt("{s}/include", .{msys2_prefix}) };
 
     const nc_dep = b.dependency("notcurses", .{});
 
@@ -281,15 +294,6 @@ pub fn build(b: *std.Build) void {
         \\  NOTCURSES_VERNUM_MAJOR, NOTCURSES_VERNUM_MINOR, NOTCURSES_VERNUM_PATCH)
         \\#endif
     );
-    _ = nc_gen.add("compat/compat.h",
-        \\#pragma once
-        \\#ifdef __MINGW32__
-        \\#include <minwindef.h>
-        \\#include <basetsd.h>
-        \\#include <winnt.h>
-        \\#endif
-        \\#include_next "compat/compat.h"
-    );
 
     const nc_cflags = &[_][]const u8{
         "-std=gnu11",           // sixel.c uses typeof() GNU extension
@@ -297,55 +301,40 @@ pub fn build(b: *std.Build) void {
         "-Wno-unused-function", "-Wno-deprecated-declarations",
     };
 
-    // Optional: path to MSYS2 MinGW64 include dir (Windows CI).
-    // Passed as -Dmsys2-include=C:/msys64/mingw64/include so that only
-    // the notcurses C module sees the MSYS2 headers, avoiding conflicts
-    // with zig's bundled Windows API headers in other modules.
-    const msys2_include = b.option([]const u8, "msys2-include",
-        "MSYS2 MinGW64 include directory (Windows only, for notcurses build)");
+    var notcurses_lib: ?*std.Build.Step.Compile = null;
+    if (!use_system_notcurses_windows) {
+        const nc_mod = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+        nc_mod.addCSourceFiles(.{
+            .root = nc_dep.path("src/lib"),
+            .files = &.{
+                "automaton.c", "banner.c",   "blit.c",     "debug.c",
+                "direct.c",    "egcpool.c",  "fade.c",     "fd.c",
+                "fill.c",      "gpm.c",      "in.c",       "kitty.c",
+                "layout.c",    "linux.c",    "menu.c",     "metric.c",
+                "mice.c",      "notcurses.c","plot.c",     "progbar.c",
+                "reader.c",    "reel.c",     "render.c",   "selector.c",
+                "sixel.c",     "sprite.c",   "stats.c",    "tabbed.c",
+                "termdesc.c",  "tree.c",     "unixsig.c",  "util.c",
+                "visual.c",    "windows.c",
+            },
+            .flags = nc_cflags,
+        });
+        nc_mod.addCSourceFiles(.{
+            .root = nc_dep.path("src/compat"),
+            .files = &.{"compat.c"},
+            .flags = nc_cflags,
+        });
+        nc_mod.addIncludePath(nc_gen.getDirectory());
+        nc_mod.addIncludePath(nc_dep.path("include"));
+        nc_mod.addIncludePath(nc_dep.path("src"));
+        nc_mod.addIncludePath(nc_dep.path("src/lib"));
 
-    const nc_mod = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
-    nc_mod.addCSourceFiles(.{
-        .root = nc_dep.path("src/lib"),
-        .files = &.{
-            "automaton.c", "banner.c",   "blit.c",     "debug.c",
-            "direct.c",    "egcpool.c",  "fade.c",     "fd.c",
-            "fill.c",      "gpm.c",      "in.c",       "kitty.c",
-            "layout.c",    "linux.c",    "menu.c",     "metric.c",
-            "mice.c",      "notcurses.c","plot.c",     "progbar.c",
-            "reader.c",    "reel.c",     "render.c",   "selector.c",
-            "sixel.c",     "sprite.c",   "stats.c",    "tabbed.c",
-            "termdesc.c",  "tree.c",     "unixsig.c",  "util.c",
-            "visual.c",    "windows.c",
-        },
-        .flags = nc_cflags,
-    });
-    nc_mod.addCSourceFiles(.{
-        .root = nc_dep.path("src/compat"),
-        .files = &.{"compat.c"},
-        .flags = nc_cflags,
-    });
-    nc_mod.addIncludePath(nc_gen.getDirectory());
-    nc_mod.addIncludePath(nc_dep.path("include"));
-    nc_mod.addIncludePath(nc_dep.path("src"));
-    nc_mod.addIncludePath(nc_dep.path("src/lib"));
-    // Platform-specific compile settings for notcurses sources.
-    if (target.result.os.tag == .windows) {
-        nc_mod.addCMacro("NOMINMAX", "1");
-        nc_mod.addCMacro("WIN32_LEAN_AND_MEAN", "1");
-        // Add MSYS2 headers ONLY for this module as after-include paths so
-        // zig's bundled Windows headers win include resolution for WinAPI,
-        // while notcurses can still pick up libunistring/ncurses headers.
-        if (msys2_include) |p| {
-            nc_mod.addAfterIncludePath(.{ .cwd_relative = p });
-        }
+        notcurses_lib = b.addLibrary(.{
+            .name = "notcurses",
+            .linkage = .static,
+            .root_module = nc_mod,
+        });
     }
-
-    const notcurses_lib = b.addLibrary(.{
-        .name = "notcurses",
-        .linkage = .static,
-        .root_module = nc_mod,
-    });
 
     // Translate notcurses C headers to Zig (Zig 0.16 @cImport replacement).
     const nc_translate = b.addTranslateC(.{
@@ -353,8 +342,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    nc_translate.addIncludePath(nc_dep.path("include"));
-    nc_translate.addIncludePath(nc_gen.getDirectory());
+    if (use_system_notcurses_windows) {
+        nc_translate.addIncludePath(msys2_include);
+    } else {
+        nc_translate.addIncludePath(nc_dep.path("include"));
+        nc_translate.addIncludePath(nc_gen.getDirectory());
+    }
     nc_translate.defineCMacro("_GNU_SOURCE", null);
     const nc_c_mod = nc_translate.createModule();
 
@@ -371,9 +364,13 @@ pub fn build(b: *std.Build) void {
     root_mod.addImport("tree-sitter", ts_module);
     root_mod.addImport("languages", languages_mod);
     root_mod.addImport("pcre2", pcre2_mod);
-    root_mod.linkLibrary(notcurses_lib);
-    linkNotcursesSystemLibs(root_mod, target);
-    root_mod.addIncludePath(nc_dep.path("include"));
+    if (notcurses_lib) |lib| root_mod.linkLibrary(lib);
+    linkNotcursesSystemLibs(root_mod, target, use_system_notcurses_windows);
+    if (use_system_notcurses_windows) {
+        root_mod.addIncludePath(msys2_include);
+    } else {
+        root_mod.addIncludePath(nc_dep.path("include"));
+    }
     root_mod.addImport("notcurses_c", nc_c_mod);
 
     const exe = b.addExecutable(.{ .name = "vx", .root_module = root_mod });
@@ -397,9 +394,13 @@ pub fn build(b: *std.Build) void {
     test_mod.addImport("tree-sitter", ts_module);
     test_mod.addImport("languages", languages_mod);
     test_mod.addImport("pcre2", pcre2_mod);
-    test_mod.linkLibrary(notcurses_lib);
-    linkNotcursesSystemLibs(test_mod, target);
-    test_mod.addIncludePath(nc_dep.path("include"));
+    if (notcurses_lib) |lib| test_mod.linkLibrary(lib);
+    linkNotcursesSystemLibs(test_mod, target, use_system_notcurses_windows);
+    if (use_system_notcurses_windows) {
+        test_mod.addIncludePath(msys2_include);
+    } else {
+        test_mod.addIncludePath(nc_dep.path("include"));
+    }
     test_mod.addImport("notcurses_c", nc_c_mod);
 
     const unit_tests = b.addTest(.{ .root_module = test_mod });
@@ -464,9 +465,13 @@ pub fn build(b: *std.Build) void {
     bench_render_mod.addImport("tree-sitter", bench_ts_mod);
     bench_render_mod.addImport("pcre2", bench_pcre2_mod);
     bench_render_mod.addImport("languages", bench_languages_mod);
-    bench_render_mod.linkLibrary(notcurses_lib);
-    linkNotcursesSystemLibs(bench_render_mod, target);
-    bench_render_mod.addIncludePath(nc_dep.path("include"));
+    if (notcurses_lib) |lib| bench_render_mod.linkLibrary(lib);
+    linkNotcursesSystemLibs(bench_render_mod, target, use_system_notcurses_windows);
+    if (use_system_notcurses_windows) {
+        bench_render_mod.addIncludePath(msys2_include);
+    } else {
+        bench_render_mod.addIncludePath(nc_dep.path("include"));
+    }
     bench_render_mod.addImport("notcurses_c", nc_c_mod);
     addCodecImports(b, bench_render_mod, codecs, codec_zigs);
 
