@@ -50,7 +50,7 @@ jobs:
         run: |
           C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed mingw-w64-x86_64-notcurses mingw-w64-x86_64-libunistring mingw-w64-x86_64-ncurses mingw-w64-x86_64-zlib mingw-w64-x86_64-libdeflate
           echo "LIBRARY_PATH=C:/msys64/mingw64/lib" >> $env:GITHUB_ENV
-          echo "PATH=C:/msys64/mingw64/bin;$env:PATH" >> $env:GITHUB_ENV
+          echo "PATH=$env:PATH;C:/msys64/mingw64/bin" >> $env:GITHUB_ENV
 
       - name: Cache Zig dependencies
         uses: actions/cache@v5
