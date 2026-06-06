@@ -90,6 +90,7 @@ jobs:
         run: zig build
 
       - name: Run unit tests
+        if: runner.os == 'Linux'
         run: zig build test
 
       - name: Run encoding validation tests

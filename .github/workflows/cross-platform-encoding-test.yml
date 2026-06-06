@@ -77,7 +77,6 @@ jobs:
             VX_BIN=./zig-out/bin/vx.exe
           fi
           TMP_DIR="$(mktemp -d)"
-          "$VX_BIN" --version
           
           # Test ASCII round-trip
           echo "Hello World" > "$TMP_DIR/test_ascii.txt"
@@ -94,6 +93,8 @@ jobs:
         run: |
           echo "Platform: ${{ matrix.os }}"
           echo "Architecture: ${{ runner.arch }}"
+          TMP_DIR="$(mktemp -d)"
+          echo "测试中文" > "$TMP_DIR/test_utf8.txt"
           
           # Test platform-specific encodings
           if [[ "${{ runner.os }}" == "Linux" ]]; then

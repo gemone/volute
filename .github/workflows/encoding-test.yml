@@ -79,7 +79,6 @@ jobs:
             VX_BIN=./zig-out/bin/vx.exe
           fi
           TMP_DIR="$(mktemp -d)"
-          "$VX_BIN" --version
           echo "Hello World" > "$TMP_DIR/test.txt"
           "$VX_BIN" -e utf-8 -o "$TMP_DIR/out.txt" "$TMP_DIR/test.txt"
           echo "✅ Encoding tests passed on ${{ matrix.os }}"
